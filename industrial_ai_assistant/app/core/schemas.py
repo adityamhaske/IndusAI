@@ -21,6 +21,7 @@ class ChunkMetadata(BaseModel):
     page_number: Optional[int] = None
     section_title: Optional[str] = None
     chunk_id: str
+    project_id: Optional[str] = None    # for cross-project contamination prevention
 
 class DocumentChunk(BaseModel):
     content: str

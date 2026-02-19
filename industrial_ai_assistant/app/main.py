@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import routes_chat, routes_logs, routes_history, routes_project
 from app.api.routes_fault import router as fault_router
 from app.api.routes_system import router as system_router
+from app.api.routes_project_knowledge import router as project_knowledge_router
 from app.config.settings import settings
 import os
 
@@ -25,6 +26,7 @@ app.include_router(routes_history.router, prefix="/api", tags=["History"])
 app.include_router(routes_project.router, prefix="/api", tags=["Projects"])
 app.include_router(fault_router, prefix="/api", tags=["PLC Faults"])
 app.include_router(system_router, prefix="/api/system", tags=["System"])
+app.include_router(project_knowledge_router, prefix="/api/project", tags=["Project Knowledge Engine"])
 
 @app.get("/api/health")
 def health_check():
