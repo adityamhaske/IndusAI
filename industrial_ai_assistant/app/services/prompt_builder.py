@@ -14,22 +14,29 @@ from __future__ import annotations
 
 from app.models.project_models import ScoredChunk, StructuredHit
 
-PROMPT_VERSION = "project_v1.0"
+PROMPT_VERSION = "project_v2.0"
 MAX_TOKENS = 3500
 _CHARS_PER_TOKEN = 4    # conservative estimate
 
 _SYSTEM_RULES = """
-STRICT RULES — you MUST follow these:
-1. You MUST NOT invent PLC tag names. Only reference tags explicitly listed in the STRUCTURED DATA section above.
-2. You MUST NOT reference any document not listed in the DOCUMENTATION CONTEXT section.
-3. If you are uncertain, state that explicitly — do not guess tag names or IO addresses.
-4. Return your answer as a JSON object matching this schema exactly:
+STRICT OUTPUT CONTRACT — you MUST follow these rules exactly:
+
+1. You MUST NOT invent PLC tag names. Only reference tags explicitly listed in STRUCTURED DATA.
+2. You MUST NOT reference documents not listed in DOCUMENTATION CONTEXT.
+3. If uncertain, state that explicitly — do not guess.
+4. Respond ONLY in valid JSON. No explanation outside the JSON. No markdown fences.
+
+Return a JSON object with EXACTLY these keys (no others):
 {
-  "answer": "<detailed technical response>",
-  "confidence": "<LOW|MEDIUM|HIGH>",
-  "reasoning": "<brief explanation of how you arrived at this answer>"
+  "summary": "<concise direct answer to the question>",
+  "root_causes": ["<cause 1>", "<cause 2>"],
+  "recommended_actions": ["<step 1>", "<step 2>"],
+  "supporting_evidence": ["<evidence or tag reference>"],
+  "limitations": ["<caveat or uncertainty>"],
+  "confidence": "<LOW|MEDIUM|HIGH>"
 }
 """
+
 
 
 def build(

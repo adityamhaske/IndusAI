@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +36,126 @@ _SKIP_EXTENSIONS = {
     ".exe", ".dll", ".pdb", ".obj", ".bin", ".pyc", ".so",
     ".zip", ".tar", ".gz", ".rar", ".7z", ".db", ".sqlite",
 }
+
+# ── Environment detection ──────────────────────────────────────────────────────
+# Running inside Docker container?
+IS_DOCKER: bool = os.path.exists("/.dockerenv")
+
+# Security: only allow ingestion within home directory tree
+# Override by setting INDUSAI_ALLOWED_ROOT env var
+_env_root = os.environ.get("INDUSAI_ALLOWED_ROOT", "")
+ALLOWED_ROOT: Path = Path(_env_root).resolve() if _env_root else Path.home()
+
+
+@dataclass
+class PathDiagnostic:
+    """Returned by validate_folder_path() — full diagnostic context."""
+    provided_path: str
+    resolved_path: str
+    cwd: str
+    container_mode: bool
+    allowed_root: str
+    effective_uid: int
+    ok: bool
+    error_code: str = ""
+    message: str = ""
+
+
+def normalize_path(raw_path: str) -> Path:
+    """
+    Safely normalise any user-supplied folder path.
+
+    Order of operations (critical):
+      1. Strip surrounding whitespace and quotes (prevents CWD-prepend bug)
+      2. Expand ~ to home directory
+      3. If absolute → resolve directly (NEVER prepend CWD)
+      4. If relative → resolve relative to CWD
+    """
+    # Step 1: strip quotes — the root cause of "CWD prepended" bug
+    clean = raw_path.strip().strip('"').strip("'").strip()
+    # Step 2: expand ~
+    raw = Path(clean).expanduser()
+    # Step 3: absolute vs relative (NEVER join CWD with an absolute path)
+    if raw.is_absolute():
+        return raw.resolve()
+    return (Path.cwd() / raw).resolve()
+
+
+def validate_folder_path(raw_path: str) -> PathDiagnostic:
+    """
+    Resolve and validate the folder path robustly.
+    Returns PathDiagnostic(ok=True) when valid, or ok=False + error info.
+    Never raises.
+    """
+    cwd = os.getcwd()
+    uid = os.getuid() if hasattr(os, 'getuid') else -1
+    clean = raw_path.strip().strip('"').strip("'").strip()
+
+    try:
+        path = normalize_path(raw_path)
+    except Exception as exc:
+        return PathDiagnostic(
+            provided_path=raw_path, resolved_path="ERROR",
+            cwd=cwd, container_mode=IS_DOCKER,
+            allowed_root=str(ALLOWED_ROOT), effective_uid=uid,
+            ok=False, error_code="PATH_RESOLUTION_FAILED",
+            message=f"Could not resolve path: {exc}",
+        )
+
+    resolved = str(path)
+    is_abs = Path(clean).expanduser().is_absolute()
+
+    logger.info(
+        "[path-validate] provided=%r clean=%r resolved=%r is_absolute=%s cwd=%r docker=%s uid=%s",
+        raw_path, clean, resolved, is_abs, cwd, IS_DOCKER, uid,
+    )
+
+    if not path.exists():
+        return PathDiagnostic(
+            provided_path=raw_path, resolved_path=resolved,
+            cwd=cwd, container_mode=IS_DOCKER,
+            allowed_root=str(ALLOWED_ROOT), effective_uid=uid,
+            ok=False, error_code="PATH_NOT_FOUND",
+            message=(
+                f"Path does not exist: {resolved!r}"
+                + (" — backend is running inside a Docker container; "
+                   "ensure the host path is mounted into the container."
+                   if IS_DOCKER else "")
+            ),
+        )
+
+    if not path.is_dir():
+        return PathDiagnostic(
+            provided_path=raw_path, resolved_path=resolved,
+            cwd=cwd, container_mode=IS_DOCKER,
+            allowed_root=str(ALLOWED_ROOT), effective_uid=uid,
+            ok=False, error_code="NOT_A_DIRECTORY",
+            message=f"{resolved!r} exists but is a file, not a directory.",
+        )
+
+    # Security: must be within ALLOWED_ROOT
+    try:
+        path.relative_to(ALLOWED_ROOT)
+    except ValueError:
+        return PathDiagnostic(
+            provided_path=raw_path, resolved_path=resolved,
+            cwd=cwd, container_mode=IS_DOCKER,
+            allowed_root=str(ALLOWED_ROOT), effective_uid=uid,
+            ok=False, error_code="OUTSIDE_ALLOWED_ROOT",
+            message=(
+                f"Security policy: {resolved!r} is outside the allowed root "
+                f"{str(ALLOWED_ROOT)!r}. "
+                f"Set INDUSAI_ALLOWED_ROOT env var to override."
+            ),
+        )
+
+    return PathDiagnostic(
+        provided_path=raw_path, resolved_path=resolved,
+        cwd=cwd, container_mode=IS_DOCKER,
+        allowed_root=str(ALLOWED_ROOT), effective_uid=uid,
+        ok=True,
+    )
+
 
 
 class _ProjectState:
@@ -72,18 +194,28 @@ class ProjectContextManager:
     def set_project(self, folder_path: str, project_id: str) -> ProjectStatus:
         """
         Register a folder for a project.
-        Computes content-based hash and marks previous index as STALE
-        if the hash differs.
+        Uses validate_folder_path() for robust resolution — never stores raw user string.
+        Raises ValueError with structured diagnostic JSON string on failure.
         """
-        folder = Path(folder_path)
-        if not folder.exists() or not folder.is_dir():
-            raise ValueError(f"Folder does not exist or is not a directory: {folder_path}")
+        diag = validate_folder_path(folder_path)
+        if not diag.ok:
+            import json
+            raise ValueError(json.dumps({
+                "error": diag.error_code,
+                "provided_path": diag.provided_path,
+                "resolved_path": diag.resolved_path,
+                "cwd": diag.cwd,
+                "container_mode": diag.container_mode,
+                "allowed_root": diag.allowed_root,
+                "message": diag.message,
+            }))
 
+        path = Path(diag.resolved_path)
         state = self._get_state(project_id)
-        new_hash = _compute_project_hash(folder)
+        new_hash = _compute_project_hash(path)
 
         with state.lock:
-            state.folder = str(folder)
+            state.folder = diag.resolved_path   # always store resolved, not raw
             if state.index_state == IndexState.READY and state.project_hash != new_hash:
                 logger.warning(
                     "[%s] Project hash changed (%s→%s). Marking STALE.",
@@ -92,6 +224,10 @@ class ProjectContextManager:
                 state.index_state = IndexState.STALE
             state.project_hash = new_hash
 
+        logger.info(
+            "[%s] Project set: resolved=%r hash=%s docker=%s",
+            project_id, diag.resolved_path, new_hash[:8], IS_DOCKER,
+        )
         return self.get_status(project_id)
 
     def mark_indexing(self, project_id: str) -> None:

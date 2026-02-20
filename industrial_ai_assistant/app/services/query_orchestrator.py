@@ -105,21 +105,24 @@ class QueryOrchestrator:
         llm_ms = (time.perf_counter() - t_llm) * 1000
 
         # ── Step 8: Parse + validate schema ──────────────────────────────────
-        answer, confidence, reasoning = _parse_llm_output(raw_response)
+        parsed = _parse_llm_output(raw_response)
+        confidence = parsed["confidence"]
 
-        # ── Step 9: Hallucination guard ───────────────────────────────────────
+        # ── Step 9: Hallucination guard (runs on summary + evidence) ─────────
         known_tags = si.all_tag_names_lower()
-        hallucinated = _detect_hallucinated_tags(answer, known_tags)
+        # Combine text fields that may contain tag references
+        guard_text = parsed["summary"] + " " + " ".join(parsed["supporting_evidence"])
+        hallucinated = _detect_hallucinated_tags(guard_text, known_tags)
 
         if hallucinated:
             logger.warning(
                 "[%s] Hallucinated tags detected: %s — stripping from answer.",
                 project_id, hallucinated,
             )
-            # Strip hallucinated tokens from answer (replace with [REDACTED])
             for tag in hallucinated:
-                # case-insensitive replacement
-                answer = re.sub(re.escape(tag), "[REDACTED]", answer, flags=re.IGNORECASE)
+                parsed["summary"] = re.sub(
+                    re.escape(tag), "[REDACTED]", parsed["summary"], flags=re.IGNORECASE
+                )
 
         total_ms = (time.perf_counter() - t_start) * 1000
         warnings: list[str] = []
@@ -127,6 +130,17 @@ class QueryOrchestrator:
             warnings.append(
                 f"LLM invented {len(hallucinated)} PLC tag(s) — they have been redacted."
             )
+        if not parsed.get("_raw_valid"):
+            warnings.append("LLM response was not valid JSON — used plain text fallback.")
+
+        # Store full structured response as JSON string in answer field
+        answer_json = json.dumps({
+            "summary":             parsed["summary"],
+            "root_causes":         parsed["root_causes"],
+            "recommended_actions": parsed["recommended_actions"],
+            "supporting_evidence": parsed["supporting_evidence"],
+            "limitations":         parsed["limitations"],
+        })
 
         return ProjectQueryResponse(
             question=request.question,
@@ -134,7 +148,7 @@ class QueryOrchestrator:
             query_intent=intent,
             structured_hits=structured_hits,
             semantic_sources=[sc.chunk.source_file for sc in semantic_hits],
-            answer=answer,
+            answer=answer_json,
             confidence=confidence,
             hallucinated_tags_removed=hallucinated,
             prompt_version=PROMPT_VERSION,
@@ -142,6 +156,7 @@ class QueryOrchestrator:
             total_latency_ms=round(total_ms, 1),
             warnings=warnings,
         )
+
 
 
 # ── Structured lookup ──────────────────────────────────────────────────────────
@@ -196,25 +211,72 @@ def _call_llm(prompt: str) -> str:
     return llm.generate(prompt)
 
 
-def _parse_llm_output(raw: str) -> tuple[str, str, str]:
-    """Extract answer/confidence/reasoning from JSON or plain text."""
-    # Try JSON parse
+def _parse_llm_output(raw: str) -> dict:
+    """
+    Parse LLM JSON response according to the v2 schema:
+    {
+      "summary": str,
+      "root_causes": list[str],
+      "recommended_actions": list[str],
+      "supporting_evidence": list[str],
+      "limitations": list[str],
+      "confidence": LOW|MEDIUM|HIGH
+    }
+
+    Handles:
+    - Clean JSON
+    - JSON wrapped in markdown code fences
+    - Partial/malformed JSON (best-effort extraction)
+    - Plain text fallback
+    """
+    _REQUIRED_KEYS = {"summary", "root_causes", "recommended_actions",
+                      "supporting_evidence", "limitations", "confidence"}
+
     try:
-        # Find JSON block (may be wrapped in markdown code fences)
-        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        # Strip markdown code fences if present
+        cleaned = re.sub(r'^```(?:json)?\s*', '', raw.strip(), flags=re.MULTILINE)
+        cleaned = re.sub(r'```\s*$', '', cleaned, flags=re.MULTILINE)
+        cleaned = cleaned.strip()
+
+        # Find outermost JSON object
+        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
         if match:
             data = json.loads(match.group())
-            answer = data.get("answer", raw)
+            # Validate + normalise keys
             confidence = str(data.get("confidence", "LOW")).upper()
             if confidence not in ("LOW", "MEDIUM", "HIGH"):
                 confidence = "LOW"
-            reasoning = data.get("reasoning", "")
-            return answer, confidence, reasoning
+
+            def _to_list(v):
+                if isinstance(v, list):
+                    return [str(i) for i in v if i]
+                if isinstance(v, str) and v:
+                    return [v]
+                return []
+
+            return {
+                "summary":              str(data.get("summary", raw[:200])),
+                "root_causes":          _to_list(data.get("root_causes", [])),
+                "recommended_actions":  _to_list(data.get("recommended_actions", [])),
+                "supporting_evidence":  _to_list(data.get("supporting_evidence", [])),
+                "limitations":          _to_list(data.get("limitations", [])),
+                "confidence":           confidence,
+                "_raw_valid":           True,
+            }
     except Exception:
         pass
 
-    # Fallback: use full text as answer
-    return raw, "LOW", ""
+    # Fallback: plain text response — wrap it in the schema
+    return {
+        "summary":             raw[:500] if raw else "No response from LLM.",
+        "root_causes":         [],
+        "recommended_actions": [],
+        "supporting_evidence": [],
+        "limitations":         ["LLM response was not in expected JSON format."],
+        "confidence":          "LOW",
+        "_raw_valid":          False,
+    }
+
 
 
 # ── Hallucination guard ────────────────────────────────────────────────────────

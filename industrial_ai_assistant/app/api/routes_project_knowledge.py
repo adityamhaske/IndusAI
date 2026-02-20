@@ -65,9 +65,28 @@ async def ingest_project(body: IngestRequest):
             content={"error_type": exc.error_type, "message": exc.message},
         )
     except ValueError as exc:
+        # ValueError from set_project carries a JSON-encoded PathDiagnostic
+        import json
+        raw = str(exc)
+        try:
+            diag = json.loads(raw)
+            error_code = diag.get("error", "INVALID_FOLDER")
+        except (json.JSONDecodeError, Exception):
+            diag = {"message": raw}
+            error_code = "INVALID_FOLDER"
+
+        # Surface IS_DOCKER warning if path not found
+        from app.services.project_context_manager import IS_DOCKER
+        if IS_DOCKER:
+            diag.setdefault("warnings", [])
+            diag["warnings"].append(
+                "Backend is running inside a Docker container. "
+                "Ensure the host path is volume-mounted into the container."
+            )
+
         return JSONResponse(
             status_code=400,
-            content={"error_type": "INVALID_FOLDER", "message": str(exc)},
+            content={"error": error_code, **diag},
         )
     except Exception as exc:
         logger.exception("Ingestion failed for project=%s", body.project_id)
@@ -174,6 +193,42 @@ def project_metrics(project_id: str = Query(default="default")):
         ingestion_duration_ms=status.ingestion_duration_ms,
         last_index_time=status.last_index_time,
     )
+
+# ── GET /api/project/debug-path ───────────────────────────────────────────────
+
+@router.get("/debug-path")
+def debug_path(folder_path: str = Query(..., description="Path to test")):
+    """
+    Quick diagnostic: checks whether the backend process can access a given path.
+    Does NOT ingest or modify any state.
+
+    Returns exists, is_dir, resolved_path, cwd, container_mode, allowed_root.
+    Use this to diagnose Docker mount issues or path typos.
+    """
+    from app.services.project_context_manager import validate_folder_path, IS_DOCKER
+    import os
+    from pathlib import Path
+
+    diag = validate_folder_path(folder_path)
+    resp = {
+        "provided_path": diag.provided_path,
+        "resolved_path": diag.resolved_path,
+        "exists": os.path.exists(diag.resolved_path) if diag.resolved_path != "ERROR" else False,
+        "is_dir": os.path.isdir(diag.resolved_path) if diag.resolved_path != "ERROR" else False,
+        "cwd": diag.cwd,
+        "container_mode": diag.container_mode,
+        "allowed_root": diag.allowed_root,
+        "effective_uid": diag.effective_uid,
+        "ok": diag.ok,
+    }
+    if not diag.ok:
+        resp["error_code"] = diag.error_code
+        resp["message"] = diag.message
+    if IS_DOCKER:
+        resp["docker_warning"] = (
+            "Backend running in Docker. Host paths must be mounted as volumes."
+        )
+    return resp
 
 
 # ── DELETE /api/project/reset ─────────────────────────────────────────────────
