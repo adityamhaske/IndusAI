@@ -1,153 +1,149 @@
 """
-L5X Parser — Rockwell Studio 5000 project file parser.
+L5X Parser — Studio 5000 Logix Designer project files.
 
-Parses XML structure of .L5X files to extract:
-  - Controller-scoped and Program-scoped Tags
-  - Routines (LAD / FBD / SFC / ST)
-  - Add-On Instructions (AOIs)
+Extracts:
+  - Tags (Controller-scoped and Program-scoped)
+  - Routines (RLL/ST/FBD)
+  - Add-On Instruction definitions (AOI)
 
-Uses stdlib xml.etree.ElementTree — no external dependency needed.
+L5X is an XML format; no external library needed beyond stdlib.
 """
+import logging
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Tuple
-import logging
 
 from app.models.project_models import AOIRecord, RoutineRecord, TagRecord
 
 logger = logging.getLogger(__name__)
 
-# Data-type synonyms Rockwell uses internally
-_KNOWN_TYPES = {
-    "BOOL", "SINT", "INT", "DINT", "LINT", "REAL", "LREAL",
-    "STRING", "TIMER", "COUNTER", "CONTROL", "MESSAGE", "AXIS_GENERIC",
-}
+# Max rung content stored per routine (bytes)
+_MAX_RUNG_CONTENT = 8_192
 
 
-def parse_l5x(file_path: str) -> Tuple[List[TagRecord], List[RoutineRecord], List[AOIRecord]]:
+def parse(path: str | Path) -> Tuple[List[TagRecord], List[RoutineRecord], List[AOIRecord]]:
     """
     Parse a Studio 5000 L5X file.
 
     Returns:
-        (tags, routines, aois)
-
+        (tags, routines, aois) — lists of typed records.
     Raises:
-        ValueError if file cannot be parsed as valid L5X XML.
+        ValueError if file is not parseable XML.
     """
-    path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"L5X file not found: {file_path}")
-
+    source = str(path)
     try:
-        tree = ET.parse(file_path)
+        tree = ET.parse(source)
     except ET.ParseError as exc:
-        raise ValueError(f"Invalid L5X XML in {file_path}: {exc}") from exc
+        raise ValueError(f"L5X parse error in {source}: {exc}") from exc
 
     root = tree.getroot()
-    source = path.name
+
     tags: List[TagRecord] = []
     routines: List[RoutineRecord] = []
     aois: List[AOIRecord] = []
 
-    # ── Controller-scoped tags ────────────────────────────────────────────────
-    for tag_el in root.findall(".//Tags/Tag"):
-        tr = _parse_tag_element(tag_el, scope="Controller", source=source)
-        if tr:
-            tags.append(tr)
+    _extract_controller_tags(root, tags, source)
+    _extract_program_tags(root, tags, source)
+    _extract_routines(root, routines, source)
+    _extract_aois(root, aois, source)
 
-    # ── Program-scoped tags ───────────────────────────────────────────────────
-    for prog_el in root.findall(".//Programs/Program"):
-        prog_name = prog_el.get("Name", "Unknown")
-        for tag_el in prog_el.findall(".//Tags/Tag"):
-            tr = _parse_tag_element(tag_el, scope=prog_name, source=source)
-            if tr:
-                tags.append(tr)
-
-    # ── Routines ──────────────────────────────────────────────────────────────
-    for prog_el in root.findall(".//Programs/Program"):
-        prog_name = prog_el.get("Name", "Unknown")
-        for rtn_el in prog_el.findall(".//Routines/Routine"):
-            name = rtn_el.get("Name", "")
-            if not name:
-                continue
-            rung_count = len(rtn_el.findall(".//Rung"))
-            routines.append(RoutineRecord(
-                name=name,
-                program_name=prog_name,
-                type=rtn_el.get("Type", "LAD"),
-                description=_get_description(rtn_el),
-                rung_count=rung_count,
-                source_file=source,
-            ))
-
-    # ── AOIs ──────────────────────────────────────────────────────────────────
-    for aoi_el in root.findall(".//AddOnInstructionDefinitions/AddOnInstructionDefinition"):
-        name = aoi_el.get("Name", "")
-        if not name:
-            continue
-        params = []
-        for p in aoi_el.findall(".//Parameters/Parameter"):
-            params.append({
-                "name": p.get("Name", ""),
-                "data_type": p.get("DataType", ""),
-                "usage": p.get("Usage", ""),
-                "description": _get_description(p),
-            })
-        aois.append(AOIRecord(
-            name=name,
-            description=_get_description(aoi_el),
-            parameters=params,
-            source_file=source,
-        ))
-
-    logger.info(
-        "L5X parsed: %s → %d tags, %d routines, %d AOIs",
-        path.name, len(tags), len(routines), len(aois),
+    logger.debug(
+        "L5X %s → %d tags, %d routines, %d AOIs",
+        Path(source).name, len(tags), len(routines), len(aois),
     )
     return tags, routines, aois
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Internal helpers ──────────────────────────────────────────────────────────
 
-def _parse_tag_element(el: ET.Element, scope: str, source: str) -> TagRecord | None:
-    name = el.get("Name", "")
-    data_type = el.get("DataType", "")
-    if not name or not data_type:
-        return None
-    return TagRecord(
+def _text(elem, tag: str, default: str = "") -> str:
+    """Safe child-element text extractor."""
+    child = elem.find(tag)
+    if child is not None and child.text:
+        return child.text.strip()
+    return default
+
+
+def _extract_controller_tags(root: ET.Element, out: List[TagRecord], source: str) -> None:
+    """Extract tags from <Controller><Tags> section."""
+    for tags_elem in root.iter("Tags"):
+        parent = _get_parent_name(root, tags_elem)
+        if parent.lower() == "controller" or parent == "":
+            for tag in tags_elem.findall("Tag"):
+                _append_tag(tag, scope="Controller", source=source, out=out)
+
+
+def _extract_program_tags(root: ET.Element, out: List[TagRecord], source: str) -> None:
+    """Extract tags from each <Program><Tags> section."""
+    for prog in root.iter("Program"):
+        prog_name = prog.get("Name", "")
+        for tags_elem in prog.findall("Tags"):
+            for tag in tags_elem.findall("Tag"):
+                _append_tag(tag, scope=f"Program:{prog_name}", source=source, out=out)
+
+
+def _append_tag(tag: ET.Element, scope: str, source: str, out: List[TagRecord]) -> None:
+    name = tag.get("Name", "")
+    if not name:
+        return
+    out.append(TagRecord(
         name=name,
-        data_type=data_type,
-        description=_get_description(el),
+        data_type=tag.get("DataType", ""),
+        tag_type=tag.get("TagType", "Base"),
         scope=scope,
-        external_access=el.get("ExternalAccess", "Read/Write"),
+        description=_text(tag, "Description"),
         source_file=source,
-    )
+    ))
 
 
-def _get_description(el: ET.Element) -> str:
-    desc_el = el.find("Description")
-    if desc_el is not None and desc_el.text:
-        return desc_el.text.strip()
+def _extract_routines(root: ET.Element, out: List[RoutineRecord], source: str) -> None:
+    for prog in root.iter("Program"):
+        prog_name = prog.get("Name", "")
+        for routine in prog.iter("Routine"):
+            name = routine.get("Name", "")
+            if not name:
+                continue
+            rtype = routine.get("Type", "RLL")
+            rungs = routine.findall(".//Rung")
+            rung_texts = []
+            total_len = 0
+            for rung in rungs:
+                txt = _text(rung, "Text")
+                if txt and total_len + len(txt) < _MAX_RUNG_CONTENT:
+                    rung_texts.append(txt)
+                    total_len += len(txt)
+            out.append(RoutineRecord(
+                name=name,
+                program=prog_name,
+                routine_type=rtype,
+                rung_count=len(rungs),
+                content="\n".join(rung_texts),
+                source_file=source,
+            ))
+
+
+def _extract_aois(root: ET.Element, out: List[AOIRecord], source: str) -> None:
+    for aoi_def in root.iter("AddOnInstructionDefinition"):
+        name = aoi_def.get("Name", "")
+        if not name:
+            continue
+        params = [
+            p.get("Name", "")
+            for p in aoi_def.findall(".//Parameter")
+            if p.get("Name")
+        ]
+        out.append(AOIRecord(
+            name=name,
+            description=_text(aoi_def, "Description"),
+            revision=aoi_def.get("Revision", ""),
+            parameters=params,
+            source_file=source,
+        ))
+
+
+def _get_parent_name(root: ET.Element, target: ET.Element) -> str:
+    """Walk tree to find parent element name."""
+    for parent in root.iter():
+        if target in list(parent):
+            return parent.tag
     return ""
-
-
-def l5x_to_text_chunks(tags: List[TagRecord], routines: List[RoutineRecord], aois: List[AOIRecord]) -> str:
-    """
-    Convert parsed L5X data to a plain-text representation suitable
-    for semantic chunking and indexing.
-    """
-    lines = []
-    if tags:
-        lines.append("## Tags")
-        for t in tags:
-            lines.append(f"- {t.name} ({t.data_type}) [{t.scope}]: {t.description}")
-    if routines:
-        lines.append("\n## Routines")
-        for r in routines:
-            lines.append(f"- {r.name} in {r.program_name} ({r.type}, {r.rung_count} rungs): {r.description}")
-    if aois:
-        lines.append("\n## Add-On Instructions")
-        for a in aois:
-            params_str = ", ".join(p["name"] for p in a.parameters)
-            lines.append(f"- {a.name}({params_str}): {a.description}")
-    return "\n".join(lines)

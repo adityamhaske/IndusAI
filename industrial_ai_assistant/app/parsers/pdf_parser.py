@@ -1,114 +1,127 @@
 """
-PDF Parser — chunks PDF content by headings for semantic indexing.
+PDF Parser — Extracts sections from engineering PDFs.
 
-Uses pdfminer.six when available, falls back to pypdf.
-Each detected heading starts a new chunk.
+Strategy:
+  - Use pdfplumber for text extraction page-by-page
+  - Detect headings using ALL_CAPS or short-line + title-case heuristics
+  - Chunk by heading; max 1200 chars with 150-char overlap
+  - Returns [{title, content, page, source_file}]
 """
 import logging
 import re
 from pathlib import Path
 from typing import List
-import hashlib
 
-from app.core.schemas import ChunkMetadata, DocumentChunk
+from app.models.project_models import SemanticChunk
 
 logger = logging.getLogger(__name__)
 
-# Heading detection regexes (ordered by priority)
-_HEADING_PATTERNS = [
-    re.compile(r"^\s*(?:\d+\.)+\s+[A-Z].{3,}$"),        # 1.2.3 Title
-    re.compile(r"^\s*[A-Z][A-Z\s]{4,}$"),                # ALL CAPS HEADING
-    re.compile(r"^\s*(?:Chapter|Section|Appendix)\s+\d+", re.IGNORECASE),
-    re.compile(r"^\s*#{1,4}\s+.+"),                       # Markdown-style (in text-PDFs)
-]
-_MIN_CHUNK_CHARS = 80
-_MAX_CHUNK_CHARS = 2000
+_MAX_CHUNK_CHARS = 1_200
+_OVERLAP_CHARS = 150
+_MIN_HEADING_WORDS = 2
+_MAX_HEADING_WORDS = 12
 
 
-def parse_pdf(file_path: str, project_id: str = "") -> List[DocumentChunk]:
+def parse(path: str | Path, project_id: str = "default") -> List[SemanticChunk]:
     """
-    Parse a PDF into heading-bounded DocumentChunks.
+    Parse a PDF into heading-chunked SemanticChunks.
 
-    Tries pdfminer.six first, falls back to pypdf.
-    Returns an empty list (logs warning) if neither is installed.
+    Returns:
+        List of SemanticChunk — one per section/chunk.
     """
-    path = Path(file_path)
-    text = _extract_text(file_path)
-    if not text:
-        logger.warning("PDF extraction yielded no text: %s", path.name)
-        return []
+    try:
+        import pdfplumber
+    except ImportError as exc:
+        raise ImportError("pdfplumber is required: pip install pdfplumber") from exc
 
-    chunks = _chunk_by_headings(text, source=path.name, project_id=project_id)
-    logger.info("PDF parsed: %s → %d chunks", path.name, len(chunks))
+    source = str(path)
+    chunks: List[SemanticChunk] = []
+
+    try:
+        with pdfplumber.open(source) as pdf:
+            sections: List[dict] = []   # [{title, content, page}]
+            current_title = "Introduction"
+            current_content: List[str] = []
+            current_page = 1
+
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                for line in text.splitlines():
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if _is_heading(stripped):
+                        # Save current section
+                        if current_content:
+                            sections.append({
+                                "title": current_title,
+                                "content": " ".join(current_content),
+                                "page": current_page,
+                            })
+                        current_title = stripped
+                        current_content = []
+                        current_page = page.page_number
+                    else:
+                        current_content.append(stripped)
+
+            # Flush last section
+            if current_content:
+                sections.append({
+                    "title": current_title,
+                    "content": " ".join(current_content),
+                    "page": current_page,
+                })
+
+        # Split long sections into overlapping chunks
+        for section in sections:
+            sub_chunks = _split_to_chunks(section["content"], _MAX_CHUNK_CHARS, _OVERLAP_CHARS)
+            for i, text in enumerate(sub_chunks):
+                chunk_id = f"{Path(source).stem}_{section['page']}_{i}"
+                chunks.append(SemanticChunk(
+                    chunk_id=chunk_id,
+                    project_id=project_id,
+                    content=text,
+                    source_file=source,
+                    section_title=section["title"],
+                    file_type="pdf",
+                    page=section["page"],
+                ))
+
+    except Exception as exc:
+        raise ValueError(f"PDF parse error for {source}: {exc}") from exc
+
+    logger.debug("PDF %s → %d chunks", Path(source).name, len(chunks))
     return chunks
 
 
-def _extract_text(file_path: str) -> str:
-    """Try pdfminer.six, then pypdf, then return empty string."""
-    # ── pdfminer.six (preferred — better layout handling) ─────────────────────
-    try:
-        from pdfminer.high_level import extract_text as pm_extract
-        return pm_extract(file_path)
-    except ImportError:
-        pass
-    except Exception as exc:
-        logger.warning("pdfminer failed on %s: %s", file_path, exc)
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-    # ── pypdf fallback ────────────────────────────────────────────────────────
-    try:
-        from pypdf import PdfReader
-        reader = PdfReader(file_path)
-        parts = []
-        for page in reader.pages:
-            t = page.extract_text()
-            if t:
-                parts.append(t)
-        return "\n".join(parts)
-    except ImportError:
-        pass
-    except Exception as exc:
-        logger.warning("pypdf failed on %s: %s", file_path, exc)
-
-    logger.error(
-        "No PDF library installed. Run: pip install pdfminer.six  OR  pip install pypdf"
-    )
-    return ""
-
-
-def _chunk_by_headings(text: str, source: str, project_id: str) -> List[DocumentChunk]:
-    lines = text.splitlines()
-    chunks: List[DocumentChunk] = []
-    current_title = "Introduction"
-    current_lines: List[str] = []
-
-    def _flush(title: str, lines: List[str]):
-        content = "\n".join(lines).strip()
-        if len(content) < _MIN_CHUNK_CHARS:
-            return
-        content = content[:_MAX_CHUNK_CHARS]
-        cid = hashlib.md5(f"{source}:{title}:{content[:40]}".encode()).hexdigest()[:16]
-        chunks.append(DocumentChunk(
-            content=content,
-            metadata=ChunkMetadata(
-                source_file=source,
-                section_title=title,
-                chunk_id=cid,
-                project_id=project_id or None,
-            ),
-        ))
-
-    for line in lines:
-        if _is_heading(line):
-            _flush(current_title, current_lines)
-            current_title = line.strip().lstrip("#").strip()
-            current_lines = []
-        else:
-            current_lines.append(line)
-
-    _flush(current_title, current_lines)
-    return chunks
+_SECTION_NUM_RE = re.compile(r"^\d+(\.\d+)*\s+\w")  # "3.2 Section Title"
 
 
 def _is_heading(line: str) -> bool:
-    stripped = line.rstrip()
-    return any(p.match(stripped) for p in _HEADING_PATTERNS)
+    """Heuristically detect heading lines."""
+    words = line.split()
+    n = len(words)
+    if n < _MIN_HEADING_WORDS or n > _MAX_HEADING_WORDS:
+        return False
+    if line.isupper() and n <= 8:
+        return True
+    if _SECTION_NUM_RE.match(line):
+        return True
+    # Title case (most words capitalize)
+    upper_words = sum(1 for w in words if w and w[0].isupper())
+    return upper_words >= max(2, n // 2) and not line.endswith(".")
+
+
+def _split_to_chunks(text: str, max_chars: int, overlap: int) -> List[str]:
+    """Split long text into overlapping fixed-size chunks."""
+    if len(text) <= max_chars:
+        return [text]
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + max_chars
+        chunks.append(text[start:end])
+        start += max_chars - overlap
+    return chunks

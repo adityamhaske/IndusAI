@@ -1,177 +1,230 @@
 """
-ProjectContextManager — singleton store tracking ingestion state per project.
+ProjectContextManager — Manages project state, hashing, and readiness.
 
-Responsibilities:
-  - Register a project folder (set_project)
-  - Compute a project_hash from mtime of the folder tree
-  - Track ingestion status (PENDING → RUNNING → COMPLETE | FAILED)
-  - Enforce project readiness gate: raise ProjectNotReadyError if not COMPLETE
-  - Expose status for GET /api/project/status
+Design:
+  - Per-project singleton via _registry
+  - Content-based hashing: SHA-256 of file contents for <5MB, sampling for larger
+  - Detects stale index when project_hash changes after ingestion
+  - Thread-safe state via RLock
 """
-from __future__ import annotations
-
 import hashlib
 import logging
-import os
+import threading
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Dict, Optional
 
-from app.core.project_exceptions import ProjectNotReadyError
-from app.models.project_models import IngestionStatus, ProjectStatusResponse
+from app.core.project_exceptions import (
+    ProjectIndexStaleError,
+    ProjectNotFoundError,
+    ProjectNotReadyError,
+)
+from app.models.project_models import IngestionResult, ProjectStatus
 
 logger = logging.getLogger(__name__)
 
+_LARGE_FILE_THRESHOLD = 5 * 1024 * 1024   # 5 MB
+_SAMPLE_SIZE = 64 * 1024                   # 64 KB per sample
 
-def _compute_folder_hash(folder_path: str) -> str:
+
+def _content_fingerprint(path: Path) -> str:
     """
-    SHA-256 of the sorted (path, mtime) pairs in a folder tree.
-    Cheap enough to run at ingest time; not called on every query.
+    SHA-256 content fingerprint.
+    Small files (<5MB): full content hash.
+    Large files: sample first + middle + last 64KB.
     """
-    parts = []
-    for root, dirs, files in os.walk(folder_path):
-        dirs.sort()
-        for f in sorted(files):
-            fp = os.path.join(root, f)
-            try:
-                mtime = os.path.getmtime(fp)
-                parts.append(f"{fp}:{mtime:.0f}")
-            except OSError:
-                pass
-    digest = hashlib.sha256("\n".join(parts).encode()).hexdigest()
-    return digest[:16]
+    size = path.stat().st_size
+    hasher = hashlib.sha256()
+    if size < _LARGE_FILE_THRESHOLD:
+        hasher.update(path.read_bytes())
+    else:
+        with open(path, "rb") as f:
+            hasher.update(f.read(_SAMPLE_SIZE))                # first
+            f.seek(max(0, size // 2 - _SAMPLE_SIZE // 2))
+            hasher.update(f.read(_SAMPLE_SIZE))                # middle
+            f.seek(max(0, size - _SAMPLE_SIZE))
+            hasher.update(f.read(_SAMPLE_SIZE))                # last
+        hasher.update(str(size).encode())
+    return hasher.hexdigest()
+
+
+def compute_project_hash(folder: Path) -> tuple[str, int]:
+    """
+    Compute a deterministic fingerprint for the project folder.
+    Returns (hash_str, file_count).
+    """
+    fingerprints = []
+    count = 0
+    for p in sorted(folder.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = str(p.relative_to(folder))
+        # Skip ignored paths
+        if any(part in rel for part in ("__pycache__", ".git", "node_modules", "venv", ".venv")):
+            continue
+        try:
+            fingerprints.append(f"{rel}:{_content_fingerprint(p)}")
+            count += 1
+        except Exception as exc:
+            logger.debug("Hash skip %s: %s", p, exc)
+
+    combined = "\n".join(fingerprints) + f"\ncount:{count}"
+    return hashlib.sha256(combined.encode()).hexdigest(), count
 
 
 class _ProjectState:
     """Internal state for one project."""
 
-    def __init__(self, project_id: str, folder_path: str):
+    def __init__(self, project_id: str, folder: str):
         self.project_id = project_id
-        self.folder = folder_path
-        self.project_hash = _compute_folder_hash(folder_path)
-        self.status = IngestionStatus.PENDING
+        self.folder = folder
+        self.project_hash = ""
+        self.indexed_hash = ""       # hash at time of last successful ingestion
+        self.file_count = 0
+        self.is_ready = False
+        self.ingestion_running = False
+        self.last_result: Optional[IngestionResult] = None
         self.last_index_time: Optional[datetime] = None
-        self.errors: List[str] = []
-        # Metrics (populated by pipeline)
-        self.files_indexed = 0
-        self.tags_indexed = 0
-        self.routines_indexed = 0
-        self.aois_indexed = 0
-        self.io_rows_indexed = 0
-        self.semantic_chunks = 0
+        self._lock = threading.RLock()
+
+    @property
+    def index_stale(self) -> bool:
+        return self.is_ready and self.project_hash != self.indexed_hash
 
 
 class ProjectContextManager:
     """
-    Module-level singleton (get_project_context_manager()) holding per-project state.
+    Manages project metadata and readiness state.
+    Thread-safe per project.
     """
 
     def __init__(self):
         self._projects: Dict[str, _ProjectState] = {}
+        self._registry_lock = threading.Lock()
 
-    # ── Project lifecycle ─────────────────────────────────────────────────────
+    def _get_or_create(self, project_id: str, folder: str) -> _ProjectState:
+        with self._registry_lock:
+            if project_id not in self._projects:
+                self._projects[project_id] = _ProjectState(project_id, folder)
+            return self._projects[project_id]
 
-    def set_project(self, project_id: str, folder_path: str) -> str:
+    def set_project(self, folder_path: str, project_id: str) -> tuple[str, int]:
         """
-        Register / re-register a project folder.
-        Resets status to PENDING so a new ingestion run is required.
-
-        Returns the computed project_hash.
+        Register a project folder. Computes content-based project_hash.
+        Returns (project_hash, file_count).
+        Raises FileNotFoundError if folder doesn't exist.
         """
-        if not os.path.isdir(folder_path):
-            raise FileNotFoundError(
-                f"Project folder does not exist: {folder_path}"
+        folder = Path(folder_path)
+        if not folder.is_dir():
+            raise FileNotFoundError(f"Project folder not found: {folder_path}")
+
+        state = self._get_or_create(project_id, folder_path)
+        with state._lock:
+            state.folder = folder_path
+            ph, fc = compute_project_hash(folder)
+            state.project_hash = ph
+            state.file_count = fc
+            logger.info(
+                "Project '%s' registered: folder=%s hash=%s files=%d",
+                project_id, folder_path, ph[:8], fc,
             )
-        state = _ProjectState(project_id, folder_path)
-        self._projects[project_id] = state
-        logger.info(
-            "ProjectContextManager: set project=%s folder=%s hash=%s",
-            project_id, folder_path, state.project_hash,
-        )
-        return state.project_hash
+        return ph, fc
 
-    def mark_running(self, project_id: str) -> None:
-        self._require(project_id).status = IngestionStatus.RUNNING
-
-    def mark_complete(self, project_id: str, metrics: dict) -> None:
-        state = self._require(project_id)
-        state.status = IngestionStatus.COMPLETE
-        state.last_index_time = datetime.now(timezone.utc)
-        state.files_indexed = metrics.get("files_indexed", 0)
-        state.tags_indexed = metrics.get("tags_indexed", 0)
-        state.routines_indexed = metrics.get("routines_indexed", 0)
-        state.aois_indexed = metrics.get("aois_indexed", 0)
-        state.io_rows_indexed = metrics.get("io_rows_indexed", 0)
-        state.semantic_chunks = metrics.get("semantic_chunks", 0)
-        logger.info("ProjectContextManager: project=%s COMPLETE %s", project_id, metrics)
-
-    def mark_failed(self, project_id: str, error: str) -> None:
-        state = self._require(project_id)
-        state.status = IngestionStatus.FAILED
-        state.errors.append(error)
-        logger.error("ProjectContextManager: project=%s FAILED: %s", project_id, error)
-
-    def add_error(self, project_id: str, error: str) -> None:
+    def mark_ingested(self, project_id: str, result: IngestionResult) -> None:
+        """Called by pipeline after successful ingestion."""
         state = self._projects.get(project_id)
-        if state:
-            state.errors.append(error)
-
-    # ── Query gate ────────────────────────────────────────────────────────────
-
-    def is_ready(self, project_id: str) -> bool:
-        state = self._projects.get(project_id)
-        return state is not None and state.status == IngestionStatus.COMPLETE
+        if state is None:
+            return
+        with state._lock:
+            state.indexed_hash = state.project_hash
+            state.is_ready = True
+            state.last_result = result
+            state.last_index_time = datetime.now(timezone.utc)
 
     def require_ready(self, project_id: str) -> None:
-        """Raise ProjectNotReadyError if project not fully ingested."""
-        if not self.is_ready(project_id):
-            raise ProjectNotReadyError(project_id)
+        """
+        Raise if project is not ready or index is stale.
+        Must be called at the start of every query.
+        """
+        state = self._projects.get(project_id)
+        if state is None or not state.is_ready:
+            raise ProjectNotReadyError()
+        if state.index_stale:
+            raise ProjectIndexStaleError(project_id)
 
-    # ── Status ────────────────────────────────────────────────────────────────
+    def get_status(self, project_id: str) -> ProjectStatus:
+        from app.indexes.structured_index import get_structured_index
+        from app.indexes.semantic_index import get_semantic_index
 
-    def get_status(self, project_id: str) -> ProjectStatusResponse:
         state = self._projects.get(project_id)
         if state is None:
-            return ProjectStatusResponse(
+            return ProjectStatus(project_id=project_id)
+
+        si_stats = get_structured_index(project_id).stats()
+        sem_idx = get_semantic_index()
+
+        warnings = list(si_stats.get("warnings", []))
+        if si_stats.get("memory_mb", 0) > 200:
+            warnings.append(f"StructuredIndex memory {si_stats['memory_mb']:.1f} MB — consider splitting large projects.")
+
+        with state._lock:
+            result = state.last_result
+            return ProjectStatus(
                 project_id=project_id,
-                project_loaded=False,
-                status=IngestionStatus.PENDING,
+                project_loaded=state.is_ready,
+                folder=state.folder,
+                project_hash=state.project_hash,
+                index_stale=state.index_stale,
+                files_indexed=result.files_indexed if result else 0,
+                tags_indexed=si_stats["tags"],
+                routines_indexed=si_stats["routines"],
+                aois_indexed=si_stats["aois"],
+                io_rows_indexed=si_stats["ios"],
+                semantic_chunks=sem_idx.chunk_count(project_id),
+                memory_mb=si_stats["memory_mb"],
+                last_index_time=state.last_index_time,
+                ingestion_running=state.ingestion_running,
+                warnings=warnings,
+                errors=result.errors if result else [],
             )
-        return ProjectStatusResponse(
-            project_id=project_id,
-            project_loaded=state.status == IngestionStatus.COMPLETE,
-            folder=state.folder,
-            status=state.status,
-            files_indexed=state.files_indexed,
-            tags_indexed=state.tags_indexed,
-            routines_indexed=state.routines_indexed,
-            aois_indexed=state.aois_indexed,
-            io_rows_indexed=state.io_rows_indexed,
-            semantic_chunks=state.semantic_chunks,
-            last_index_time=state.last_index_time,
-            errors=state.errors,
-        )
+
+    def get_metrics(self, project_id: str) -> dict:
+        from app.indexes.structured_index import get_structured_index
+        from app.indexes.semantic_index import get_semantic_index
+
+        state = self._projects.get(project_id)
+        si = get_structured_index(project_id).stats()
+        sem = get_semantic_index()
+        return {
+            "project_id": project_id,
+            "structured_memory_mb": si["memory_mb"],
+            "tags": si["tags"],
+            "routines": si["routines"],
+            "aois": si["aois"],
+            "io_rows": si["ios"],
+            "semantic_chunk_count": sem.chunk_count(project_id),
+            "ingestion_duration_s": state.last_result.duration_s if state and state.last_result else 0,
+        }
 
     def reset(self, project_id: str) -> None:
-        self._projects.pop(project_id, None)
-        logger.info("ProjectContextManager: removed project=%s", project_id)
+        """Purge all state for a project."""
+        from app.indexes.structured_index import delete_structured_index
+        from app.indexes.semantic_index import get_semantic_index
 
-    # ── Internal ──────────────────────────────────────────────────────────────
+        delete_structured_index(project_id)
+        get_semantic_index().delete_project(project_id)
 
-    def _require(self, project_id: str) -> _ProjectState:
-        state = self._projects.get(project_id)
-        if state is None:
-            raise KeyError(
-                f"Project '{project_id}' not registered. Call set_project() first."
-            )
-        return state
+        with self._registry_lock:
+            self._projects.pop(project_id, None)
+        logger.info("Project '%s' reset complete.", project_id)
 
 
-# ── Module-level singleton ─────────────────────────────────────────────────────
-_manager: Optional[ProjectContextManager] = None
+# ── Singleton ─────────────────────────────────────────────────────────────────
+_ctx_manager: Optional[ProjectContextManager] = None
 
 
 def get_project_context_manager() -> ProjectContextManager:
-    global _manager
-    if _manager is None:
-        _manager = ProjectContextManager()
-    return _manager
+    global _ctx_manager
+    if _ctx_manager is None:
+        _ctx_manager = ProjectContextManager()
+    return _ctx_manager

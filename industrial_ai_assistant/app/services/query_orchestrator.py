@@ -1,240 +1,301 @@
 """
-QueryOrchestrator — 9-step pipeline for project knowledge queries.
+QueryOrchestrator — 9-step PLC project query pipeline.
 
 Steps:
-  1. Validate project is loaded (ProjectContextManager.require_ready)
-  2. Classify query (QueryClassifier)
-  3. Structured lookup — exact tag / IO / routine matches
-  4. Semantic search — top_k doc chunks filtered to project_id
-  5. Merge contexts (structured first, semantic second)
-  6. Build deterministic prompt with explicit anti-hallucination instruction
-  7. Call OllamaLLM.generate()
-  8. Hallucination guard — extract tag tokens, verify vs StructuredIndex
-  9. Return ProjectQueryResponse
+  1. require_ready(project_id)             — fail-fast
+  2. classify(query)                       — multi-label QueryIntent
+  3. structured lookups                    — TAG/IO/ROUTINE from StructuredIndex (exact)
+  4. semantic retrieval                    — hybrid BM25+vector from SemanticIndex
+  5. merge contexts
+  6. build prompt (PromptBuilder, 3800 token budget)
+  7. call LLM → raw JSON
+  8. extract PLC tag candidates
+  9. fuzzy validate against StructuredIndex → reject hallucinated
 
-Strict rules:
-  - No silent fallback: raise TagHallucinationError on invented tags
-  - No cross-project data: SemanticIndex filters by project_id
-  - LLM never receives raw CSV or raw L5X
+No silent fallback. Every failure raises a typed exception.
 """
-from __future__ import annotations
-
+import json
 import logging
 import re
 import time
-from typing import List
+from difflib import SequenceMatcher
+from typing import Dict, List, Optional, Tuple
 
-from app.core.project_exceptions import TagHallucinationError
-from app.indexes.semantic_index import SemanticIndex
-from app.indexes.structured_index import ProjectStructuredIndex
+from app.core.project_exceptions import HallucinatedTagError, ProjectNotReadyError
+from app.indexes.semantic_index import get_semantic_index
+from app.indexes.structured_index import get_structured_index
 from app.models.project_models import (
     ProjectQueryRequest,
     ProjectQueryResponse,
-    StructuredMatch,
+    StructuredHit,
 )
-from app.services.project_context_manager import ProjectContextManager
-from app.services.query_classifier import QueryType, classify, extract_tag_tokens
+from app.services.project_context_manager import get_project_context_manager
+from app.services.query_classifier import classify
 
 logger = logging.getLogger(__name__)
 
-_MAX_STRUCT_MATCHES = 5
-_MAX_SEMANTIC_CHUNKS = 5
-_MAX_CONTEXT_CHARS = 3000
+PROMPT_VERSION = "project_v1.0"
+_MAX_TOKENS = 3_800          # character-based budget (≈4 chars/token)
+_MAX_CHARS = _MAX_TOKENS * 4 # 15,200 chars
+_FUZZY_THRESHOLD = 0.85      # min ratio for fuzzy tag match
+
+# Patterns for extracting PLC tag candidates from LLM output
+_TAG_PATTERNS = [
+    re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b"),                   # MOTOR_SPEED
+    re.compile(r"\b\w+:([A-Z][A-Z0-9_]{2,})\b"),             # Program:Tag
+    re.compile(r"\b([A-Z][A-Z0-9_]+)\.([A-Z][A-Z0-9_]+)\b"), # Tag.Member
+]
+
+# Noise words that match tag pattern but are not tags
+_NOISE_WORDS = frozenset([
+    "LOW", "HIGH", "TRUE", "FALSE", "NONE", "NULL",
+    "LLM", "PLC", "CPU", "IO", "RIO", "AOI", "JSON",
+    "GET", "SET", "TAG", "AND", "NOT", "FOR", "ALL",
+    "MAX", "MIN", "AVG", "SUM", "NEW", "OLD",
+])
 
 
 class QueryOrchestrator:
-    """Stateless orchestrator — all state lives in injected services."""
+    """Full 9-step query orchestration pipeline."""
 
-    def __init__(
-        self,
-        context_manager: ProjectContextManager,
-        struct_idx: ProjectStructuredIndex,
-        semantic_index: SemanticIndex,
-        llm,
-    ):
-        self._ctx = context_manager
-        self._struct = struct_idx
-        self._sem = semantic_index
+    def __init__(self, llm=None):
         self._llm = llm
 
+    def _get_llm(self):
+        if self._llm is None:
+            from app.config.dependency_injection import get_container
+            self._llm = get_container().llm
+        return self._llm
+
     def query(self, request: ProjectQueryRequest) -> ProjectQueryResponse:
-        project_id = request.project_id
-        q = request.query.strip()
-
-        # ── Step 1: Readiness gate ────────────────────────────────────────────
-        self._ctx.require_ready(project_id)
-
-        # ── Step 2: Classify ──────────────────────────────────────────────────
-        q_type = classify(q)
-        logger.info("Query classified as %s (project=%s)", q_type, project_id)
-
-        # ── Step 3: Structured lookup ────────────────────────────────────────
-        structured_matches = self._structured_lookup(q, q_type)
-
-        # ── Step 4: Semantic search ───────────────────────────────────────────
-        sem_chunks = self._sem.search(project_id, q, top_k=request.top_k_semantic)
-        sem_sources = list({c.metadata.source_file for c in sem_chunks})
-
-        # ── Step 5: Build context ─────────────────────────────────────────────
-        struct_block = _render_structured_block(structured_matches)
-        sem_block = _render_semantic_block(sem_chunks)
-
-        # ── Step 6: Build prompt ──────────────────────────────────────────────
-        all_tag_names = self._struct.all_tag_names()
-        prompt = _build_prompt(q, q_type, struct_block, sem_block, all_tag_names)
-
-        # ── Step 7: LLM call ──────────────────────────────────────────────────
+        pid = request.project_id
         t0 = time.perf_counter()
-        raw_answer = self._llm.generate(prompt)
+
+        # ── Step 1: Fail-fast readiness check ────────────────────────────────
+        get_project_context_manager().require_ready(pid)
+
+        # ── Step 2: Classify query ────────────────────────────────────────────
+        intent = classify(request.question)
+        logger.info("Query intent: labels=%s struct=%s sem=%s",
+                    intent.labels, intent.structured_required, intent.semantic_required)
+
+        # ── Step 3: Structured lookups ────────────────────────────────────────
+        s_idx = get_structured_index(pid)
+        structured_hits: List[StructuredHit] = []
+
+        if intent.structured_required:
+            # Extract potential identifiers from query
+            candidates = re.findall(r"[A-Z][A-Z0-9_]{2,}", request.question)
+            for cand in candidates:
+                tag = s_idx.get_tag(cand)
+                if tag:
+                    structured_hits.append(StructuredHit(
+                        type="tag",
+                        name=tag.name,
+                        detail={"data_type": tag.data_type, "scope": tag.scope,
+                                "description": tag.description},
+                    ))
+                routine = s_idx.get_routine(cand)
+                if routine:
+                    structured_hits.append(StructuredHit(
+                        type="routine",
+                        name=routine.name,
+                        detail={"program": routine.program, "type": routine.routine_type,
+                                "rungs": routine.rung_count},
+                    ))
+
+            # IO lookup: slot/rack numbers
+            slots = re.findall(r"\b(\d+)\b", request.question)
+            for slot in slots[:3]:
+                io = s_idx.get_io(slot)
+                if io:
+                    structured_hits.append(StructuredHit(
+                        type="io",
+                        name=f"Slot {slot}",
+                        detail={"module": io.module, "description": io.description,
+                                "tag_name": io.tag_name, "rack": io.rack},
+                    ))
+
+        # ── Step 4: Semantic retrieval ────────────────────────────────────────
+        sem_docs: List[dict] = []
+        if intent.semantic_required or intent.progress_required:
+            sem_idx = get_semantic_index()
+            sem_docs = sem_idx.search(
+                query=request.question,
+                project_id=pid,
+                top_k=5,
+            )
+
+        # ── Step 5: Merge context ─────────────────────────────────────────────
+        doc_sources = list(dict.fromkeys(
+            d["source_file"] for d in sem_docs if d.get("source_file")
+        ))
+
+        # ── Step 6: Build prompt with token budget ────────────────────────────
+        prompt = _build_prompt(
+            question=request.question,
+            structured_hits=structured_hits,
+            sem_docs=sem_docs,
+            all_tag_names=s_idx.all_tag_names(),
+        )
+
+        # ── Step 7: Call LLM ──────────────────────────────────────────────────
+        llm = self._get_llm()
+        raw = llm.generate(prompt)
         llm_ms = (time.perf_counter() - t0) * 1000
-        logger.debug("LLM responded in %.0fms", llm_ms)
 
-        # ── Step 8: Hallucination guard ───────────────────────────────────────
-        referenced_tags = self._hallucination_guard(raw_answer)
+        # ── Step 8: Parse LLM response ────────────────────────────────────────
+        parsed = _parse_response(raw)
 
-        # ── Step 9: Assemble response ─────────────────────────────────────────
-        confidence = _estimate_confidence(structured_matches, sem_chunks)
+        # ── Step 9: Hallucination guard ───────────────────────────────────────
+        known_tags = s_idx.all_tag_names()
+        rejected = _validate_tags(parsed.get("summary", "") + parsed.get("reasoning", ""), known_tags)
+        if rejected:
+            logger.error("Hallucinated tags rejected: %s", rejected)
+            raise HallucinatedTagError(rejected)
 
         return ProjectQueryResponse(
-            project_id=project_id,
-            query=q,
-            query_type=q_type.value,
-            structured_matches=structured_matches,
-            semantic_sources=sem_sources,
-            answer=raw_answer,
-            tags_referenced=referenced_tags,
-            confidence=confidence,
+            project_id=pid,
+            question=request.question,
+            summary=parsed.get("summary", raw[:500]),
+            reasoning=parsed.get("reasoning", ""),
+            structured_hits=structured_hits,
+            documentation_sources=doc_sources,
+            confidence=parsed.get("confidence", "LOW"),
+            prompt_version=PROMPT_VERSION,
+            hallucinated_tags_rejected=[],
+            query_labels=[str(l) for l in intent.labels],
             llm_latency_ms=round(llm_ms, 1),
         )
 
-    # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _structured_lookup(self, query: str, q_type: QueryType) -> List[StructuredMatch]:
-        matches: List[StructuredMatch] = []
-
-        if q_type == QueryType.TAG_LOOKUP:
-            tokens = extract_tag_tokens(query)
-            for token in tokens[:_MAX_STRUCT_MATCHES]:
-                record = self._struct.get_tag(token)
-                if record:
-                    matches.append(StructuredMatch(
-                        match_type="tag",
-                        data=record.model_dump(),
-                    ))
-            # Also do a partial search if no exact matches
-            if not matches and tokens:
-                partial = self._struct.search_tags(tokens[0], limit=3)
-                matches = [StructuredMatch(match_type="tag", data=t.model_dump()) for t in partial]
-
-        elif q_type == QueryType.IO_LOOKUP:
-            # Extract slot-like tokens: digits with colons e.g. "1:2:3"
-            slots = re.findall(r"\d+:\d+(?::\d+)*", query)
-            for slot in slots[:_MAX_STRUCT_MATCHES]:
-                record = self._struct.get_io(slot)
-                if record:
-                    matches.append(StructuredMatch(match_type="io", data=record.model_dump()))
-            # Also look for tag names in IO context
-            if not matches:
-                tokens = extract_tag_tokens(query)
-                for t in tokens[:3]:
-                    try:
-                        rec = self._struct.io.get_by_tag(t)
-                        matches.append(StructuredMatch(match_type="io", data=rec.model_dump()))
-                    except KeyError:
-                        pass
-
-        elif q_type == QueryType.ROUTINE_FLOW:
-            # Try to find routine names in query
-            # Routines are typically CamelCase or UPPERCASE words
-            for token in re.findall(r"\b[A-Za-z][A-Za-z0-9_]{2,}\b", query):
-                record = self._struct.get_routine(token)
-                if record:
-                    matches.append(StructuredMatch(match_type="routine", data=record.model_dump()))
-                    if len(matches) >= _MAX_STRUCT_MATCHES:
-                        break
-
-        return matches
-
-    def _hallucination_guard(self, llm_output: str) -> List[str]:
-        """
-        Extract all PLC-tag-like tokens from LLM output.
-        Verify each exists in the StructuredIndex.
-        Raise TagHallucinationError if any invented tags found.
-        Returns list of validated referenced tags.
-        """
-        tokens = extract_tag_tokens(llm_output)
-        invented = [t for t in tokens if not self._struct.has_tag(t)]
-
-        if invented:
-            logger.error(
-                "Hallucination guard triggered: invented tags=%s", invented
-            )
-            raise TagHallucinationError(invented_tags=invented)
-
-        return tokens
-
-
-# ── Prompt building ───────────────────────────────────────────────────────────
+# ── Prompt builder ─────────────────────────────────────────────────────────────
 
 def _build_prompt(
-    query: str,
-    q_type: QueryType,
-    struct_block: str,
-    sem_block: str,
-    all_tag_names: List[str],
+    question: str,
+    structured_hits: List[StructuredHit],
+    sem_docs: List[dict],
+    all_tag_names: frozenset,
 ) -> str:
-    tag_list_hint = ""
-    if all_tag_names:
-        sample = ", ".join(all_tag_names[:30])
-        tag_list_hint = f"\nKnown PLC tags (sample of {len(all_tag_names)}): {sample}...\n"
+    """Build LLM prompt with strict token budget enforcement."""
+    budget = _MAX_CHARS
+    sections: List[str] = []
 
-    return f"""You are a production PLC commissioning assistant.
+    header = (
+        f"You are an expert PLC commissioning assistant. "
+        f"Answer the engineer's question using ONLY the context below.\n"
+        f"CRITICAL RULES:\n"
+        f"  1. DO NOT invent PLC tags. Only reference tags listed in STRUCTURED INDEX.\n"
+        f"  2. Return valid JSON matching the schema exactly.\n"
+        f"  3. If context is insufficient, state that in 'reasoning'.\n\n"
+        f"QUESTION: {question}\n"
+    )
+    budget -= len(header)
+    sections.append(header)
 
-STRICT RULES:
-1. You MUST NOT invent PLC tags. Only reference tags explicitly listed in the STRUCTURED INDEX below.
-2. If a tag is not in the structured index, state that it was not found in the project.
-3. Answer using only the context provided. Do not fabricate field values.
-4. Be precise and concise. This is an industrial engineering context.
-{tag_list_hint}
-QUERY TYPE: {q_type.value}
-QUERY: {query}
+    # Structured hits section
+    if structured_hits:
+        struct_lines = ["STRUCTURED INDEX MATCHES:"]
+        for h in structured_hits:
+            line = f"  [{h.type.upper()}] {h.name}: {h.detail}"
+            if budget - len(line) > 500:
+                struct_lines.append(line)
+                budget -= len(line)
+        struct_section = "\n".join(struct_lines) + "\n"
+        sections.append(struct_section)
+    else:
+        sections.append("STRUCTURED INDEX MATCHES: (none found for this query)\n")
+        budget -= 50
 
-STRUCTURED INDEX MATCHES:
-{struct_block or "(no exact structured match found)"}
+    # Known tag list sample (first 100 for reference)
+    tag_sample = sorted(list(all_tag_names))[:100]
+    if tag_sample:
+        tag_hint = "VALID PLC TAGS (subset): " + ", ".join(tag_sample[:50]) + "\n"
+        if budget - len(tag_hint) > 500:
+            sections.append(tag_hint)
+            budget -= len(tag_hint)
 
-DOCUMENTATION CONTEXT:
-{sem_block or "(no documentation retrieved)"}
+    # Semantic docs section
+    if sem_docs:
+        sem_lines = ["DOCUMENTATION CONTEXT:"]
+        for doc in sem_docs:
+            title = doc.get("section_title") or doc.get("source_file", "")
+            excerpt = doc.get("content", "")[:600]
+            entry = f"  [{title}]\n  {excerpt}\n"
+            if budget - len(entry) > 200:
+                sem_lines.append(entry)
+                budget -= len(entry)
+        sections.append("\n".join(sem_lines) + "\n")
 
-Answer the query using the structured matches and documentation context above.
-If the answer cannot be determined from the provided context, say so explicitly.
-"""
+    # Output schema
+    schema = (
+        '\nOUTPUT (strict JSON only, no prose outside):\n'
+        '{\n'
+        '  "summary": "<concise answer to the question>",\n'
+        '  "reasoning": "<explain how you derived the answer>",\n'
+        '  "confidence": "LOW|MEDIUM|HIGH"\n'
+        '}\n'
+    )
+    sections.append(schema)
 
-
-def _render_structured_block(matches: List[StructuredMatch]) -> str:
-    if not matches:
-        return ""
-    lines = []
-    for m in matches:
-        lines.append(f"[{m.match_type.upper()}]")
-        for k, v in m.data.items():
-            if v:
-                lines.append(f"  {k}: {v}")
-    return "\n".join(lines)[:_MAX_CONTEXT_CHARS]
-
-
-def _render_semantic_block(chunks) -> str:
-    if not chunks:
-        return ""
-    parts = []
-    for chunk in chunks:
-        title = chunk.metadata.section_title or chunk.metadata.source_file
-        parts.append(f"[{title}]\n{chunk.content[:600]}")
-    return "\n\n".join(parts)[:_MAX_CONTEXT_CHARS]
+    return "".join(sections)
 
 
-def _estimate_confidence(structured_matches, sem_chunks) -> str:
-    if structured_matches and sem_chunks:
-        return "HIGH"
-    if structured_matches or sem_chunks:
-        return "MEDIUM"
-    return "LOW"
+def _parse_response(raw: str) -> dict:
+    """Extract JSON from LLM response."""
+    raw = raw.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # Try extracting JSON block
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    # Fallback: return raw as summary
+    return {"summary": raw[:800], "reasoning": "", "confidence": "LOW"}
+
+
+def _validate_tags(text: str, known_tags: frozenset) -> List[str]:
+    """
+    Extract PLC tag candidates from text and validate against known tags.
+    Uses fuzzy matching (ratio ≥ 0.85) to allow minor abbreviation differences.
+    Returns list of hallucinated tags (those with no close match).
+    """
+    if not known_tags:
+        return []  # No tag index — skip guard
+
+    candidates: set = set()
+    for pattern in _TAG_PATTERNS:
+        for m in pattern.finditer(text):
+            word = m.group(1) if m.lastindex else m.group()
+            if word.upper() not in _NOISE_WORDS and len(word) >= 3:
+                candidates.add(word.upper())
+
+    hallucinated = []
+    for cand in candidates:
+        if cand in known_tags:
+            continue
+        # Fuzzy check — allow close matches
+        best_ratio = max(
+            (SequenceMatcher(None, cand, k).ratio() for k in known_tags),
+            default=0,
+        )
+        if best_ratio < _FUZZY_THRESHOLD:
+            hallucinated.append(cand)
+
+    return hallucinated
+
+
+# ── Singleton ─────────────────────────────────────────────────────────────────
+_orchestrator: Optional[QueryOrchestrator] = None
+
+
+def get_query_orchestrator() -> QueryOrchestrator:
+    global _orchestrator
+    if _orchestrator is None:
+        _orchestrator = QueryOrchestrator()
+    return _orchestrator

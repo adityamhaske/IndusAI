@@ -1,107 +1,119 @@
 """
-Tests for QueryClassifier.
+Tests — QueryClassifier multi-label intent classification.
 """
 import pytest
-
-from app.services.query_classifier import QueryType, classify, extract_tag_tokens
-
-
-# ── TAG_LOOKUP ────────────────────────────────────────────────────────────────
-
-def test_classify_explicit_plc_tag():
-    assert classify("What does CONV_RUN do?") == QueryType.TAG_LOOKUP
+from app.services.query_classifier import classify
+from app.models.project_models import QueryIntent
 
 
-def test_classify_multiple_tags():
-    assert classify("How are CONV_RUN and PUMP_SPD related?") == QueryType.TAG_LOOKUP
+def _labels(q: str):
+    return classify(q).labels
 
 
-def test_classify_tag_lookup_with_question_words():
-    assert classify("Describe the tag MOTOR_FLT") == QueryType.TAG_LOOKUP
+def test_tag_lookup_basic():
+    intent = classify("What is tag Motor_Speed?")
+    assert "TAG_LOOKUP" in intent.labels
+    assert intent.structured_required is True
 
 
-# ── IO_LOOKUP ─────────────────────────────────────────────────────────────────
-
-def test_classify_slot_query():
-    assert classify("What is at slot 1:2:0?") == QueryType.IO_LOOKUP
+def test_tag_lookup_find():
+    assert "TAG_LOOKUP" in _labels("find tag Conv_1_Fault")
 
 
-def test_classify_rio_query():
-    assert classify("Show me the RIO mapping for rack 2") == QueryType.IO_LOOKUP
+def test_io_lookup_slot():
+    assert "IO_LOOKUP" in _labels("what module is in slot 3?")
 
 
-def test_classify_srio_query():
-    assert classify("Which SRIO modules are on network segment 3?") == QueryType.IO_LOOKUP
+def test_io_lookup_rio():
+    assert "IO_LOOKUP" in _labels("show me the RIO mapping for rack 2")
 
 
-def test_classify_module_keyword():
-    assert classify("What module is in slot 3?") == QueryType.IO_LOOKUP
+def test_io_lookup_srio():
+    assert "IO_LOOKUP" in _labels("SRIO 4 module configuration")
 
 
-# ── ROUTINE_FLOW ──────────────────────────────────────────────────────────────
-
-def test_classify_routine_query():
-    assert classify("Explain the logic in the startup routine") == QueryType.ROUTINE_FLOW
-
-
-def test_classify_ladder_logic():
-    assert classify("How does the ladder logic for estop work?") == QueryType.ROUTINE_FLOW
+def test_routine_flow():
+    intent = classify("explain the MainRoutine ladder logic")
+    assert "ROUTINE_FLOW" in intent.labels
+    assert intent.structured_required is True
 
 
-# ── COMMISSION_PROGRESS ───────────────────────────────────────────────────────
-
-def test_classify_commissioning_status():
-    assert classify("What is the commissioning progress for zone 3?") == QueryType.COMMISSION_PROGRESS
-
-
-def test_classify_punch_list():
-    assert classify("Show me outstanding punch list items") == QueryType.COMMISSION_PROGRESS
+def test_system_flow_how_does():
+    intent = classify("how does the conveyor interlock work?")
+    assert "SYSTEM_FLOW" in intent.labels
+    assert intent.semantic_required is True
 
 
-# ── SYSTEM_FLOW ───────────────────────────────────────────────────────────────
-
-def test_classify_system_flow():
-    assert classify("Explain the system startup sequence") == QueryType.SYSTEM_FLOW
+def test_system_flow_why():
+    assert "SYSTEM_FLOW" in _labels("why does the system fault on startup?")
 
 
-def test_classify_safety_system():
-    assert classify("How does the safety interlock work?") == QueryType.SYSTEM_FLOW
+def test_documentation():
+    intent = classify("what does the safety PE manual say about SIL2?")
+    assert "DOCUMENTATION" in intent.labels
+    assert intent.semantic_required is True
 
 
-# ── DOCUMENTATION ─────────────────────────────────────────────────────────────
-
-def test_classify_general_what_question():
-    assert classify("What is an add-on instruction?") == QueryType.DOCUMENTATION
-
-
-def test_classify_explain():
-    assert classify("Explain how the drive is configured") == QueryType.DOCUMENTATION
+def test_commission_progress():
+    intent = classify("what commissioning steps are still pending?")
+    assert "COMMISSION_PROGRESS" in intent.labels
+    assert intent.progress_required is True
 
 
-# ── IO takes priority over tag (slot keyword wins) ────────────────────────────
-
-def test_io_wins_over_tag_when_slot_present():
-    # "slot" keyword → IO_LOOKUP even if there's also a tag-like token
-    result = classify("What tag is at slot 1:3:0 for CONV_RUN?")
-    assert result == QueryType.IO_LOOKUP
+def test_commission_checklist():
+    assert "COMMISSION_PROGRESS" in _labels("show the loop test checklist progress")
 
 
-# ── extract_tag_tokens ────────────────────────────────────────────────────────
-
-def test_extract_tag_tokens_finds_uppercase():
-    tokens = extract_tag_tokens("Tag CONV_RUN is also linked to PUMP_SPD.")
-    assert "CONV_RUN" in tokens
-    assert "PUMP_SPD" in tokens
-
-
-def test_extract_tag_tokens_filters_stopwords():
-    tokens = extract_tag_tokens("WHAT DOES THIS TAG DO?")
-    assert "WHAT" not in tokens
-    assert "DOES" not in tokens
-    assert "THIS" not in tokens
-    assert "TAG" not in tokens
+def test_multi_label_mixed_query():
+    """Mixed query: 'Why does Motor_Speed oscillate when RIO 3 faults?' → multiple labels."""
+    intent = classify("Why does Motor_Speed oscillate when RIO 3 faults?")
+    assert "SYSTEM_FLOW" in intent.labels           # 'why does'
+    assert "IO_LOOKUP" in intent.labels             # 'RIO'
+    assert intent.structured_required is True       # IO match
+    assert intent.semantic_required is True         # system_flow
 
 
-def test_extract_tag_tokens_empty():
-    assert extract_tag_tokens("") == []
-    assert extract_tag_tokens("How are you?") == []
+def test_multi_label_tag_and_routine():
+    intent = classify("find tag Step_Counter and show me the routine that uses it")
+    assert "TAG_LOOKUP" in intent.labels
+    assert "ROUTINE_FLOW" in intent.labels
+
+
+def test_unknown_catch_all():
+    intent = classify("hello world")
+    assert "UNKNOWN" in intent.labels
+    assert intent.semantic_required is True   # UNKNOWN → prompt semantic
+
+
+def test_no_labels_becomes_unknown():
+    intent = classify("xyz abc 123")
+    assert len(intent.labels) > 0
+    assert "UNKNOWN" in intent.labels
+
+
+def test_commission_sign_off():
+    assert "COMMISSION_PROGRESS" in _labels("has loop test been signed off?")
+
+
+def test_io_lookup_flex():
+    assert "IO_LOOKUP" in _labels("flex io module at slot 4")
+
+
+def test_system_flow_describe():
+    assert "SYSTEM_FLOW" in _labels("describe the startup sequence")
+
+
+def test_documentation_spec():
+    assert "DOCUMENTATION" in _labels("according to the datasheet, what is the max current?")
+
+
+def test_routine_fbd():
+    assert "ROUTINE_FLOW" in _labels("show the function block diagram for the drive")
+
+
+def test_returns_query_intent_model():
+    result = classify("any question")
+    assert isinstance(result, QueryIntent)
+    assert isinstance(result.structured_required, bool)
+    assert isinstance(result.semantic_required, bool)
+    assert isinstance(result.labels, list)

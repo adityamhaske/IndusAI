@@ -1,178 +1,137 @@
 """
-Tests for SemanticIndex project isolation and basic retrieval.
-
-Uses an in-memory mock to avoid needing a live Qdrant instance.
+Tests — SemanticIndex: upsert, BM25 search, cross-project isolation.
+Qdrant is mocked; only the in-process BM25 layer is tested here.
 """
-from __future__ import annotations
-
 import pytest
-from typing import List, Dict, Any
-
-from app.core.schemas import ChunkMetadata, DocumentChunk
 from app.indexes.semantic_index import SemanticIndex
+from app.models.project_models import SemanticChunk
 
 
-# ── In-memory Qdrant mock ─────────────────────────────────────────────────────
-
-class _InMemoryQdrantClient:
-    """
-    Minimal mock of QdrantClient that stores points in memory
-    and supports project_id filtering.
-    """
-
-    def __init__(self):
-        self._points: Dict[int, dict] = {}
-
-    def upsert(self, collection_name, points):
-        for p in points:
-            self._points[p.id] = {
-                "id": p.id,
-                "vector": p.vector,
-                "payload": p.payload,
-            }
-
-    def search(self, collection_name, query_vector, limit, query_filter, with_payload):
-        # Apply project_id filter from Qdrant filter structure
-        project_id = _extract_project_filter(query_filter)
-        results = []
-        for pid, point in self._points.items():
-            meta = point["payload"].get("metadata", {})
-            if project_id and meta.get("project_id") != project_id:
-                continue
-            results.append(_FakeHit(pid, point["payload"]))
-        # No real similarity ranking in mock — just return first `limit` results
-        return results[:limit]
-
-    def delete(self, collection_name, points_selector):
-        # Extract project_id from filter selector and delete matching
-        project_id = _extract_project_filter(points_selector.filter)
-        to_delete = [
-            pid for pid, pt in self._points.items()
-            if pt["payload"].get("metadata", {}).get("project_id") == project_id
-        ]
-        for pid in to_delete:
-            del self._points[pid]
+@pytest.fixture
+def sem():
+    """SemanticIndex with no Qdrant (embedder=None → keyword-only mode)."""
+    idx = SemanticIndex(qdrant_host="localhost", qdrant_port=6333, embedder=None)
+    # Prevent Qdrant connection
+    idx._qdrant = _QDRANT_DISABLED
+    return idx
 
 
-class _FakeHit:
-    def __init__(self, id_, payload):
-        self.id = id_
-        self.payload = payload
-
-
-def _extract_project_filter(qdrant_filter) -> str | None:
-    """Pull project_id value from a Qdrant Filter object."""
-    try:
-        must = qdrant_filter.must
-        if must:
-            cond = must[0]
-            return cond.match.value
-    except Exception:
+class _QdrantDisabled:
+    """Stub that always returns empty results."""
+    def search(self, *a, **kw):
+        return []
+    def upsert(self, *a, **kw):
         pass
-    return None
+    def get_collections(self):
+        class _C:
+            collections = []
+        return _C()
+    def delete(self, *a, **kw):
+        pass
 
 
-class _MockEmbedder:
-    """Returns a fixed-length dummy embedding (no model needed)."""
-    def embed_text(self, text: str) -> List[float]:
-        return [0.1] * 384
+_QDRANT_DISABLED = _QdrantDisabled()
 
-    def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        return [[0.1] * 384 for _ in texts]
+PROJ_A = "project_alpha"
+PROJ_B = "project_beta"
 
-
-# ── Fixtures ──────────────────────────────────────────────────────────────────
-
-def _make_index():
-    client = _InMemoryQdrantClient()
-    embedder = _MockEmbedder()
-    return SemanticIndex(
-        qdrant_client=client,
-        collection_name="test_coll",
-        embedder=embedder,
-    )
+CHUNKS_A = [
+    SemanticChunk(chunk_id="a1", project_id=PROJ_A, content="Motor speed control in conveyor line 1",
+                  source_file="plc_a.l5x", section_title="Conveyor1", file_type="l5x"),
+    SemanticChunk(chunk_id="a2", project_id=PROJ_A, content="Safety interlock for pallet lift station",
+                  source_file="safety.pdf", section_title="Safety", file_type="pdf"),
+    SemanticChunk(chunk_id="a3", project_id=PROJ_A, content="RIO rack configuration slot assignments",
+                  source_file="io.xlsx", section_title="IO Config", file_type="excel"),
+]
+CHUNKS_B = [
+    SemanticChunk(chunk_id="b1", project_id=PROJ_B, content="Pump motor fault detection algorithm",
+                  source_file="plc_b.l5x", section_title="Pump", file_type="l5x"),
+]
 
 
-def _make_chunk(content: str, source: str, project_id: str, title: str = "") -> DocumentChunk:
-    import hashlib
-    cid = hashlib.md5(f"{source}:{content[:20]}".encode()).hexdigest()[:12]
-    return DocumentChunk(
-        content=content,
-        metadata=ChunkMetadata(
-            source_file=source,
-            section_title=title or source,
-            chunk_id=cid,
-            project_id=project_id,
-        ),
-    )
+# ── Upsert ────────────────────────────────────────────────────────────────────
+
+def test_upsert_returns_count(sem):
+    n = sem.upsert_chunks(PROJ_A, CHUNKS_A)
+    assert n == len(CHUNKS_A)
 
 
-# ── Tests ─────────────────────────────────────────────────────────────────────
-
-def test_index_and_retrieve_basic():
-    idx = _make_index()
-    chunk = _make_chunk("CONV_RUN controls the conveyor belt", "manual.pdf", "proj_a")
-    n = idx.index_chunks("proj_a", [chunk])
-    assert n == 1
+def test_upsert_populates_bm25(sem):
+    sem.upsert_chunks(PROJ_A, CHUNKS_A)
+    assert sem.chunk_count(PROJ_A) == len(CHUNKS_A)
 
 
-def test_search_returns_indexed_chunk():
-    idx = _make_index()
-    chunk = _make_chunk("Pump speed is controlled by PUMP_SPD tag", "io_list.txt", "proj_a")
-    idx.index_chunks("proj_a", [chunk])
-    results = idx.search("proj_a", "pump speed")
-    assert len(results) == 1
-    assert "PUMP_SPD" in results[0].content
+def test_upsert_empty_list(sem):
+    n = sem.upsert_chunks(PROJ_A, [])
+    assert n == 0
 
 
-def test_cross_project_isolation():
-    """Chunks from project_b must NOT appear in project_a searches."""
-    idx = _make_index()
-    chunk_a = _make_chunk("Project A tag: CONV_RUN", "a.pdf", "proj_a")
-    chunk_b = _make_chunk("Project B tag: DRIVE_CMD", "b.pdf", "proj_b")
-    idx.index_chunks("proj_a", [chunk_a])
-    idx.index_chunks("proj_b", [chunk_b])
+# ── BM25 keyword search ───────────────────────────────────────────────────────
 
-    results_a = idx.search("proj_a", "tag")
-    sources_a = {r.metadata.project_id for r in results_a}
-    assert "proj_b" not in sources_a
+def test_bm25_finds_exact_keyword(sem):
+    sem.upsert_chunks(PROJ_A, CHUNKS_A)
+    results = sem.search("motor speed conveyor", PROJ_A, top_k=3)
+    assert len(results) >= 1
+    top = results[0]
+    assert "motor" in top["content"].lower() or "conveyor" in top["content"].lower()
 
 
-def test_project_b_not_in_project_a_results_and_vice_versa():
-    idx = _make_index()
-    for i in range(3):
-        idx.index_chunks("proj_x", [_make_chunk(f"X content {i}", f"x_{i}.txt", "proj_x")])
-    for i in range(3):
-        idx.index_chunks("proj_y", [_make_chunk(f"Y content {i}", f"y_{i}.txt", "proj_y")])
-
-    x_results = idx.search("proj_x", "content")
-    y_results = idx.search("proj_y", "content")
-
-    assert all(r.metadata.project_id == "proj_x" for r in x_results)
-    assert all(r.metadata.project_id == "proj_y" for r in y_results)
+def test_bm25_finds_fault(sem):
+    sem.upsert_chunks(PROJ_A, CHUNKS_A)
+    results = sem.search("safety interlock", PROJ_A, top_k=3)
+    assert any("interlock" in r["content"].lower() for r in results)
 
 
-def test_delete_project_removes_chunks():
-    idx = _make_index()
-    idx.index_chunks("proj_del", [_make_chunk("sensitive data", "secret.pdf", "proj_del")])
-    # Verify present
-    assert len(idx.search("proj_del", "sensitive")) == 1
-    # Delete
-    idx.delete_project("proj_del")
-    # Verify gone
-    assert len(idx.search("proj_del", "sensitive")) == 0
+def test_bm25_rio_search(sem):
+    sem.upsert_chunks(PROJ_A, CHUNKS_A)
+    results = sem.search("RIO rack slot", PROJ_A, top_k=3)
+    assert any("rio" in r["content"].lower() or "rack" in r["content"].lower() for r in results)
 
 
-def test_empty_project_search_returns_empty():
-    idx = _make_index()
-    results = idx.search("proj_empty", "any query")
-    assert results == []
+def test_bm25_returns_scores(sem):
+    sem.upsert_chunks(PROJ_A, CHUNKS_A)
+    results = sem.search("conveyor", PROJ_A, top_k=3)
+    for r in results:
+        assert "score" in r
+        assert isinstance(r["score"], float)
 
 
-def test_chunk_metadata_preserved_after_retrieval():
-    idx = _make_index()
-    chunk = _make_chunk("Commissioning note: drives tested", "commissioning.pdf", "proj_meta", "Section 3")
-    idx.index_chunks("proj_meta", [chunk])
-    results = idx.search("proj_meta", "drives")
-    assert results[0].metadata.source_file == "commissioning.pdf"
-    assert results[0].metadata.project_id == "proj_meta"
+def test_top_k_respected(sem):
+    sem.upsert_chunks(PROJ_A, CHUNKS_A)
+    results = sem.search("any query", PROJ_A, top_k=2)
+    assert len(results) <= 2
+
+
+# ── Cross-project isolation ───────────────────────────────────────────────────
+
+def test_cross_project_isolation(sem):
+    """Project A query must NEVER return Project B results."""
+    sem.upsert_chunks(PROJ_A, CHUNKS_A)
+    sem.upsert_chunks(PROJ_B, CHUNKS_B)
+
+    results_a = sem.search("pump motor fault", PROJ_A, top_k=5)
+    chunk_ids = {r["chunk_id"] for r in results_a}
+    assert "b1" not in chunk_ids, "Project B chunk leaked into Project A results!"
+
+
+def test_project_b_finds_own_chunks(sem):
+    sem.upsert_chunks(PROJ_A, CHUNKS_A)
+    sem.upsert_chunks(PROJ_B, CHUNKS_B)
+    results_b = sem.search("pump fault", PROJ_B, top_k=5)
+    # b1 is the only B chunk
+    assert any(r["chunk_id"] == "b1" for r in results_b)
+
+
+# ── Delete project ────────────────────────────────────────────────────────────
+
+def test_delete_project_clears_bm25(sem):
+    sem.upsert_chunks(PROJ_A, CHUNKS_A)
+    sem.delete_project(PROJ_A)
+    assert sem.chunk_count(PROJ_A) == 0
+
+
+def test_delete_project_does_not_affect_other(sem):
+    sem.upsert_chunks(PROJ_A, CHUNKS_A)
+    sem.upsert_chunks(PROJ_B, CHUNKS_B)
+    sem.delete_project(PROJ_A)
+    assert sem.chunk_count(PROJ_B) == 1

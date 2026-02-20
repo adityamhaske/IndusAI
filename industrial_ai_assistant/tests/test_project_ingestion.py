@@ -1,190 +1,190 @@
 """
-Tests for ProjectIngestionPipeline.
-
-Uses a temporary directory with synthetic project files.
+Tests — Project ingestion pipeline.
 """
 import os
 import tempfile
 import textwrap
+from pathlib import Path
+
 import pytest
 
-from app.indexes.structured_index import get_structured_store, StructuredIndexStore
-from app.models.project_models import IngestionStatus
-from app.services.project_context_manager import ProjectContextManager
-from app.services.project_ingestion_pipeline import ingest_project
+from app.indexes.structured_index import StructuredIndex, get_structured_index, delete_structured_index
+from app.indexes.semantic_index import SemanticIndex
+from app.services.project_ingestion_pipeline import ProjectIngestionPipeline, get_ingestion_pipeline
+from app.core.project_exceptions import IngestionAlreadyRunningError
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
+# ── Fixtures ───────────────────────────────────────────────────────────────────
 
-class _NoopSemanticIndex:
-    """SemanticIndex stand-in that discards all chunks — no Qdrant needed."""
-    def index_chunks(self, project_id, chunks): return len(chunks)
-    def search(self, project_id, query, top_k=5): return []
-    def delete_project(self, project_id): pass
+@pytest.fixture
+def tmp_project(tmp_path):
+    """Create a minimal project folder with sample files."""
+    # L5X file
+    l5x = tmp_path / "plc.L5X"
+    l5x.write_text(textwrap.dedent("""\
+        <?xml version="1.0"?>
+        <RSLogix5000Content>
+          <Controller>
+            <Tags>
+              <Tag Name="Motor_Speed" DataType="REAL" TagType="Base">
+                <Description>Conveyor motor speed setpoint</Description>
+              </Tag>
+              <Tag Name="Conv_1_Fault" DataType="BOOL" TagType="Base">
+                <Description>Conveyor 1 fault status</Description>
+              </Tag>
+            </Tags>
+            <Programs>
+              <Program Name="MainProgram">
+                <Tags>
+                  <Tag Name="Step_Counter" DataType="INT" TagType="Base"/>
+                </Tags>
+                <Routines>
+                  <Routine Name="MainRoutine" Type="RLL">
+                    <RLLContent>
+                      <Rung><Text>XIC(Conv_1_Fault)OTE(Alarm_Output);</Text></Rung>
+                    </RLLContent>
+                  </Routine>
+                </Routines>
+              </Program>
+            </Programs>
+          </Controller>
+        </RSLogix5000Content>
+    """))
 
+    # Excel IO sheet
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Slot", "Rack", "Module", "Description", "Tag"])
+    ws.append(["1", "0", "1769-IF4", "Analog Input Module", "AI_Speed"])
+    ws.append(["2", "0", "1769-OW8", "Output Relay Module", "DO_Conveyor"])
+    wb.save(str(tmp_path / "io_sheet.xlsx"))
 
-def _make_project_folder(tmp_path, files: dict) -> str:
-    for rel_path, content in files.items():
-        fp = os.path.join(str(tmp_path), rel_path)
-        os.makedirs(os.path.dirname(fp), exist_ok=True)
-        if isinstance(content, bytes):
-            open(fp, "wb").write(content)
-        else:
-            open(fp, "w", encoding="utf-8").write(textwrap.dedent(content))
-    return str(tmp_path)
+    # Text file
+    (tmp_path / "notes.txt").write_text(
+        "Commissioning notes for line 1.\n"
+        "Motor speed setpoint should be 1200 RPM at startup.\n"
+        "Verify Conv_1_Fault clears before enabling output."
+    )
 
-
-_MINIMAL_L5X = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<RSLogix5000Content>
-  <Controller>
-    <Tags>
-      <Tag Name="CONV_RUN" DataType="BOOL">
-        <Description>Conveyor Running Status</Description>
-      </Tag>
-      <Tag Name="CONV_SPD" DataType="REAL">
-        <Description>Conveyor Speed Setpoint</Description>
-      </Tag>
-    </Tags>
-    <Programs>
-      <Program Name="MainProgram">
-        <Tags>
-          <Tag Name="TIMER_1" DataType="TIMER">
-            <Description>Cycle Timer</Description>
-          </Tag>
-        </Tags>
-        <Routines>
-          <Routine Name="MainRoutine" Type="LAD">
-            <RLLContent>
-              <Rung Number="0" Type="N"/>
-              <Rung Number="1" Type="N"/>
-            </RLLContent>
-          </Routine>
-          <Routine Name="StartupSeq" Type="LAD">
-            <Description>Startup Sequence</Description>
-            <RLLContent>
-              <Rung Number="0" Type="N"/>
-            </RLLContent>
-          </Routine>
-        </Routines>
-      </Program>
-    </Programs>
-    <AddOnInstructionDefinitions>
-      <AddOnInstructionDefinition Name="MOT_CTL">
-        <Description>Motor Control AOI</Description>
-        <Parameters>
-          <Parameter Name="Enable" DataType="BOOL" Usage="Input"/>
-          <Parameter Name="Fault" DataType="BOOL" Usage="Output"/>
-        </Parameters>
-      </AddOnInstructionDefinition>
-    </AddOnInstructionDefinitions>
-  </Controller>
-</RSLogix5000Content>
-"""
-
-_DOCS_TXT = """\
-Section 1: System Overview
-This system controls conveyor CONV_RUN at variable speed CONV_SPD.
-
-Section 2: Safety
-Emergency stop interlock disables all motion.
-"""
+    return tmp_path
 
 
-# ── Tests ─────────────────────────────────────────────────────────────────────
-
-def test_ingest_l5x_populates_structured_index(tmp_path):
-    folder = _make_project_folder(tmp_path, {"project.l5x": _MINIMAL_L5X})
-    ctx = ProjectContextManager()
-    struct_store = StructuredIndexStore()
-    ctx.set_project("p1", folder)
-
-    ingest_project("p1", folder, ctx, struct_store, _NoopSemanticIndex())
-
-    idx = struct_store.get("p1")
-    assert idx is not None
-    assert idx.tags.count() == 3           # CONV_RUN, CONV_SPD, TIMER_1
-    assert idx.routines.count() == 2       # MainRoutine, StartupSeq
-    assert idx.aois.count() == 1           # MOT_CTL
+@pytest.fixture(autouse=True)
+def clean_index(tmp_project):
+    pid = "test_ingest_proj"
+    delete_structured_index(pid)
+    yield pid
+    delete_structured_index(pid)
 
 
-def test_ingest_marks_complete(tmp_path):
-    folder = _make_project_folder(tmp_path, {"project.l5x": _MINIMAL_L5X})
-    ctx = ProjectContextManager()
-    struct_store = StructuredIndexStore()
-    ctx.set_project("p2", folder)
+# ── Tests ──────────────────────────────────────────────────────────────────────
 
-    ingest_project("p2", folder, ctx, struct_store, _NoopSemanticIndex())
-    status = ctx.get_status("p2")
-    assert status.status == IngestionStatus.COMPLETE
-    assert status.project_loaded is True
+def test_l5x_tags_ingested(tmp_project, clean_index):
+    pid = clean_index
+    pipe = ProjectIngestionPipeline()
 
+    # Inject a no-op semantic index to avoid Qdrant dependency
+    _inject_mock_semantic(pipe)
 
-def test_ingest_text_doc_contributes_semantic_chunks(tmp_path):
-    folder = _make_project_folder(tmp_path, {
-        "project.l5x": _MINIMAL_L5X,
-        "docs/manual.txt": _DOCS_TXT,
-    })
-    ctx = ProjectContextManager()
+    result = pipe.ingest(str(tmp_project), pid)
 
-    chunks_seen = []
-    class _CountingIndex:
-        def index_chunks(self, pid, chunks):
-            chunks_seen.extend(chunks)
-            return len(chunks)
-        def search(self, *a, **k): return []
-        def delete_project(self, *a): pass
-
-    struct_store = StructuredIndexStore()
-    ctx.set_project("p3", folder)
-    results = ingest_project("p3", folder, ctx, struct_store, _CountingIndex())
-
-    assert len(chunks_seen) > 0          # text file produced semantic chunks
-    assert any(r.semantic_chunks > 0 for r in results)
+    idx = get_structured_index(pid)
+    assert idx.get_tag("Motor_Speed") is not None
+    assert idx.get_tag("Conv_1_Fault") is not None
+    assert idx.get_tag("Step_Counter") is not None
+    assert result.tags_indexed >= 3
 
 
-def test_ingest_skips_unsupported_files(tmp_path):
-    folder = _make_project_folder(tmp_path, {
-        "project.l5x": _MINIMAL_L5X,
-        "image.png": b"\x89PNG",          # binary — should be skipped
-        "archive.zip": b"PK\x03\x04",    # zip — should be skipped
-    })
-    ctx = ProjectContextManager()
-    struct_store = StructuredIndexStore()
-    ctx.set_project("p4", folder)
-    results = ingest_project("p4", folder, ctx, struct_store, _NoopSemanticIndex())
+def test_l5x_routines_ingested(tmp_project, clean_index):
+    pid = clean_index
+    pipe = ProjectIngestionPipeline()
+    _inject_mock_semantic(pipe)
+    pipe.ingest(str(tmp_project), pid)
 
-    processed_exts = {os.path.splitext(r.file_path)[1].lower() for r in results}
-    assert ".png" not in processed_exts
-    assert ".zip" not in processed_exts
+    idx = get_structured_index(pid)
+    r = idx.get_routine("MainRoutine")
+    assert r is not None
+    assert r.program == "MainProgram"
+    assert "XIC" in r.content
 
 
-def test_ingest_continues_on_bad_l5x(tmp_path):
-    folder = _make_project_folder(tmp_path, {
-        "good.l5x": _MINIMAL_L5X,
-        "broken.l5x": "THIS IS NOT XML <<<",
-        "notes.txt": "Some commissioning notes.",
-    })
-    ctx = ProjectContextManager()
-    struct_store = StructuredIndexStore()
-    ctx.set_project("p5", folder)
-    results = ingest_project("p5", folder, ctx, struct_store, _NoopSemanticIndex())
+def test_excel_io_ingested(tmp_project, clean_index):
+    pid = clean_index
+    pipe = ProjectIngestionPipeline()
+    _inject_mock_semantic(pipe)
+    result = pipe.ingest(str(tmp_project), pid)
 
-    successes = [r for r in results if r.success]
-    failures = [r for r in results if not r.success]
-    assert len(successes) >= 2    # good.l5x + notes.txt
-    assert len(failures) == 1     # broken.l5x
-    # Status must still be COMPLETE (file-level tolerance)
-    assert ctx.get_status("p5").status == IngestionStatus.COMPLETE
+    idx = get_structured_index(pid)
+    io = idx.get_io("1")
+    assert io is not None
+    assert "1769-IF4" in io.module
+    assert result.io_rows_indexed >= 2
 
 
-def test_tags_indexed_metric_reported(tmp_path):
-    folder = _make_project_folder(tmp_path, {"project.l5x": _MINIMAL_L5X})
-    ctx = ProjectContextManager()
-    struct_store = StructuredIndexStore()
-    ctx.set_project("p6", folder)
+def test_files_indexed_count(tmp_project, clean_index):
+    pid = clean_index
+    pipe = ProjectIngestionPipeline()
+    _inject_mock_semantic(pipe)
+    result = pipe.ingest(str(tmp_project), pid)
 
-    ingest_project("p6", folder, ctx, struct_store, _NoopSemanticIndex())
-    status = ctx.get_status("p6")
-    assert status.tags_indexed == 3
-    assert status.routines_indexed == 2
+    assert result.files_indexed >= 3   # L5X + xlsx + txt
+    assert result.files_failed == 0
+
+
+def test_ingestion_result_metrics(tmp_project, clean_index):
+    pid = clean_index
+    pipe = ProjectIngestionPipeline()
+    _inject_mock_semantic(pipe)
+    result = pipe.ingest(str(tmp_project), pid)
+
+    assert result.tags_indexed >= 2
+    assert result.routines_indexed >= 1
+    assert result.duration_s > 0
+    assert isinstance(result.errors, list)
+
+
+def test_double_ingest_raises_409(tmp_project, clean_index):
+    """Concurrent ingest attempt should raise IngestionAlreadyRunningError."""
+    import threading
+    pid = clean_index
+    pipe = get_ingestion_pipeline()
+    _inject_mock_semantic(pipe)
+
+    lock = pipe._get_lock(pid)
+    lock.acquire()
+    try:
+        with pytest.raises(IngestionAlreadyRunningError):
+            pipe.ingest(str(tmp_project), pid)
+    finally:
+        lock.release()
+
+
+def test_skip_binary_files(tmp_project, clean_index):
+    """Binary files like .db should be skipped, not cause failures."""
+    pid = clean_index
+    (tmp_project / "data.db").write_bytes(b"\x00\x01\x02binary")
+    pipe = ProjectIngestionPipeline()
+    _inject_mock_semantic(pipe)
+    result = pipe.ingest(str(tmp_project), pid)
+    assert result.files_failed == 0
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _inject_mock_semantic(pipe):
+    """Patch semantic index to avoid Qdrant during unit tests."""
+    import app.indexes.semantic_index as sem_module
+    mock = _MockSemanticIndex()
+    sem_module._instance = mock
+
+
+class _MockSemanticIndex:
+    def upsert_chunks(self, project_id, chunks):
+        return len(chunks)
+    def delete_project(self, project_id):
+        pass
+    def chunk_count(self, project_id):
+        return 0
+    def search(self, *a, **kw):
+        return []

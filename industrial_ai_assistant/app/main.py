@@ -26,7 +26,7 @@ app.include_router(routes_history.router, prefix="/api", tags=["History"])
 app.include_router(routes_project.router, prefix="/api", tags=["Projects"])
 app.include_router(fault_router, prefix="/api", tags=["PLC Faults"])
 app.include_router(system_router, prefix="/api/system", tags=["System"])
-app.include_router(project_knowledge_router, prefix="/api/project", tags=["Project Knowledge Engine"])
+app.include_router(project_knowledge_router, prefix="/api", tags=["Project Knowledge"])
 
 @app.get("/api/health")
 def health_check():

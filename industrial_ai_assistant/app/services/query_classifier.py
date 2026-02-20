@@ -1,114 +1,104 @@
 """
-QueryClassifier — pure rule-based query type classification.
+QueryClassifier — Multi-label rule-based query intent classification.
 
-No LLM involved. Classifies in < 1ms.
-
-Priority:
-  1. TAG_LOOKUP     — explicit PLC-tag-like tokens (UPPER_SNAKE tokens)
-  2. IO_LOOKUP      — slot / rack / RIO / SRIO keywords
-  3. ROUTINE_FLOW   — routine / rung / ladder / logic
-  4. SYSTEM_FLOW    — flow / sequence / interlock / system overview
-  5. COMMISSION_PROGRESS — commissioning / progress / punch list
-  6. DOCUMENTATION  — catch-all for doc questions
-  7. UNKNOWN        — fallback
+Design:
+  - Pure regex + keyword matching; no LLM call, no external deps
+  - Returns QueryIntent with multi-label output
+  - A single query can match TAG_LOOKUP + SYSTEM_FLOW simultaneously
+  - Deterministic and testable
 """
-from __future__ import annotations
-
 import re
-from enum import Enum
-from typing import Optional
+from typing import List
+
+from app.models.project_models import QueryIntent, QueryLabel
+
+# ── Pattern definitions ────────────────────────────────────────────────────────
+# Each pattern is (label, compiled_regex)
+_PATTERNS: List[tuple[QueryLabel, re.Pattern]] = [
+    (
+        "TAG_LOOKUP",
+        re.compile(
+            r"\b(tag|what is tag|find tag|tag value|tag name|"
+            r"what does tag|plc tag|controller tag|"
+            r"[A-Z][A-Z0-9_]{2,})\b",  # bare uppercase identifier
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "IO_LOOKUP",
+        re.compile(
+            r"\b(slot|rack|rio|srio|module|io map|io sheet|"
+            r"i\/o|input|output|digital|analog|"
+            r"chassis|point io|flex io|remote io|distributed io)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "ROUTINE_FLOW",
+        re.compile(
+            r"\b(routine|rung|ladder|ladder logic|program flow|"
+            r"logic block|fbd|function block|structured text|"
+            r"subroutine|jsr|call|instruction)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "SYSTEM_FLOW",
+        re.compile(
+            r"\b(how does|explain|describe|what does .{1,40} do|"
+            r"system flow|process flow|sequence|interlock|"
+            r"why does|reason for|cause of|purpose of|overview)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "DOCUMENTATION",
+        re.compile(
+            r"\b(manual|spec|specification|document|datasheet|"
+            r"according to|refer to|reference|standard|"
+            r"safety pe|sil|functional safety)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "COMMISSION_PROGRESS",
+        re.compile(
+            r"\b(commission|commissioning|progress|complete|completed|"
+            r"pending|outstanding|checklist|status|tested|"
+            r"loop test|sign off|sign-off|handover)\b",
+            re.IGNORECASE,
+        ),
+    ),
+]
 
 
-class QueryType(str, Enum):
-    TAG_LOOKUP = "TAG_LOOKUP"
-    IO_LOOKUP = "IO_LOOKUP"
-    ROUTINE_FLOW = "ROUTINE_FLOW"
-    SYSTEM_FLOW = "SYSTEM_FLOW"
-    DOCUMENTATION = "DOCUMENTATION"
-    COMMISSION_PROGRESS = "COMMISSION_PROGRESS"
-    UNKNOWN = "UNKNOWN"
-
-
-# ── Compiled patterns ─────────────────────────────────────────────────────────
-
-# PLC tag-like token: starts with letter, uppercase+underscores, min 3 chars
-# Deliberately excludes common English words (all-cap acronyms handled by stopwords)
-_TAG_PATTERN = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
-
-_TAG_STOPWORDS = frozenset({
-    "PLC", "HMI", "SCADA", "IO", "RIO", "SRIO", "AOI", "LAD", "FBD",
-    "PDF", "TXT", "CSV", "XML", "AND", "NOT", "THE", "FOR", "FROM",
-    "WHAT", "HOW", "WHY", "WHEN", "WHERE", "WHO", "DOES", "CAN", "IS",
-    "ARE", "HAS", "HAVE", "DOES", "DID", "WILL", "SHOULD", "WOULD",
-    "TAG", "TAGS", "SLOT", "RACK", "ALL", "NEW",
-})
-
-_IO_KEYWORDS = frozenset({
-    "slot", "rack", "module", "rio", "srio", "enet", "remote io",
-    "remote i/o", "i/o", "io map", "io list", "io sheet", "io assignment",
-    "channel", "point", "analog input", "digital output", "digital input",
-    "analog output",
-})
-
-_ROUTINE_KEYWORDS = frozenset({
-    "routine", "rung", "ladder", "logic", "function block", "structured text",
-    "sequential", "fbr", "aoi", "instruction", "interlocking rung",
-})
-
-_SYSTEM_KEYWORDS = frozenset({
-    "system flow", "system overview", "interlock", "safety", "pe", "safet pe",
-    "sequence", "sequence of operations", "permissive", "machine state",
-    "state machine", "overall", "architecture", "flow", "shutdown", "startup",
-})
-
-_COMMISSION_KEYWORDS = frozenset({
-    "commissioning", "commission", "progress", "complete", "incomplete",
-    "punch list", "punch", "tested", "verified", "not tested",
-    "outstanding", "remaining",
-})
-
-
-def classify(query: str) -> QueryType:
+def classify(query: str) -> QueryIntent:
     """
-    Classify a query string into a QueryType.
-    Pure function — stateless, no side effects.
+    Classify a query into a multi-label QueryIntent.
+
+    Returns:
+        QueryIntent with:
+          - labels: all matching QueryLabel values
+          - structured_required: True if TAG/IO/ROUTINE matched
+          - semantic_required: True if SYSTEM_FLOW/DOCUMENTATION matched
+          - progress_required: True if COMMISSION_PROGRESS matched
     """
-    q_lower = query.lower()
-    q_words = set(q_lower.split())
+    matched: List[QueryLabel] = []
 
-    # ── 1. IO_LOOKUP (before tag so "slot" queries go here) ───────────────────
-    if _IO_KEYWORDS & q_words or any(kw in q_lower for kw in _IO_KEYWORDS if " " in kw):
-        return QueryType.IO_LOOKUP
+    for label, pattern in _PATTERNS:
+        if pattern.search(query):
+            matched.append(label)
 
-    # ── 2. TAG_LOOKUP — requires ≥1 non-stopword TAG-like token ──────────────
-    tag_tokens = _TAG_PATTERN.findall(query)
-    meaningful_tags = [t for t in tag_tokens if t not in _TAG_STOPWORDS]
-    if meaningful_tags:
-        return QueryType.TAG_LOOKUP
+    if not matched:
+        matched = ["UNKNOWN"]
 
-    # ── 3. ROUTINE_FLOW ────────────────────────────────────────────────────────
-    if _ROUTINE_KEYWORDS & q_words or any(kw in q_lower for kw in _ROUTINE_KEYWORDS if " " in kw):
-        return QueryType.ROUTINE_FLOW
+    structured_required = any(l in matched for l in ("TAG_LOOKUP", "IO_LOOKUP", "ROUTINE_FLOW"))
+    semantic_required   = any(l in matched for l in ("SYSTEM_FLOW", "DOCUMENTATION", "UNKNOWN"))
+    progress_required   = "COMMISSION_PROGRESS" in matched
 
-    # ── 4. COMMISSION_PROGRESS ────────────────────────────────────────────────
-    if _COMMISSION_KEYWORDS & q_words or any(kw in q_lower for kw in _COMMISSION_KEYWORDS if " " in kw):
-        return QueryType.COMMISSION_PROGRESS
-
-    # ── 5. SYSTEM_FLOW ────────────────────────────────────────────────────────
-    if _SYSTEM_KEYWORDS & q_words or any(kw in q_lower for kw in _SYSTEM_KEYWORDS if " " in kw):
-        return QueryType.SYSTEM_FLOW
-
-    # ── 6. DOCUMENTATION (catch-all for how/what/explain) ───────────────────
-    if any(kw in q_lower for kw in ("how", "what", "explain", "describe", "why", "summarize")):
-        return QueryType.DOCUMENTATION
-
-    return QueryType.UNKNOWN
-
-
-def extract_tag_tokens(text: str) -> list[str]:
-    """
-    Extract all candidate PLC tag tokens from arbitrary text.
-    Used by the hallucination guard to find tags LLM claims to reference.
-    """
-    tokens = _TAG_PATTERN.findall(text)
-    return [t for t in tokens if t not in _TAG_STOPWORDS]
+    return QueryIntent(
+        structured_required=structured_required,
+        semantic_required=semantic_required,
+        progress_required=progress_required,
+        labels=matched,
+    )
