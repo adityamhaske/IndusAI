@@ -153,6 +153,20 @@ class StructuredIndex:
         names = self.all_tag_names()
         return frozenset(n.lower() for n in names)
 
+    def all_source_files(self) -> set[str]:
+        """Aggregate all unique source_file paths from all indexed records."""
+        with self._lock:
+            files = set()
+            for r in self._tags.values():
+                if r.source_file: files.add(r.source_file)
+            for r in self._routines.values():
+                if r.source_file: files.add(r.source_file)
+            for r in self._aois.values():
+                if r.source_file: files.add(r.source_file)
+            for r in self._io.values():
+                if r.source_file: files.add(r.source_file)
+            return files
+
     # ── Stats & memory ────────────────────────────────────────────────────────
 
     def stats(self) -> StructuredIndexStats:

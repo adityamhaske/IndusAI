@@ -10,11 +10,21 @@ const BASE = '';  // Vite proxy forwards /api → http://localhost:8001
  * POST /api/knowledge/query
  * Always returns KnowledgeQueryResponse with knowledge_mode field.
  */
-export async function queryKnowledge({ question, project_id = 'default', top_k = 5 }) {
+export async function queryKnowledge({
+  question,
+  project_id = 'default',
+  top_k = 5,
+  selected_files = [],
+  selected_folders = [],
+  scope_mode = 'GLOBAL'
+}) {
   const res = await fetch(`${BASE}/api/knowledge/query`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, project_id, top_k }),
+    body: JSON.stringify({
+      question, project_id, top_k,
+      selected_files, selected_folders, scope_mode
+    }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: `HTTP ${res.status}` }));
@@ -57,6 +67,16 @@ export async function ingestProject({ folder_path, project_id = 'default' }) {
 export async function getProjectMetrics(project_id = 'default') {
   const res = await fetch(`${BASE}/api/project/metrics?project_id=${encodeURIComponent(project_id)}`);
   if (!res.ok) throw new Error(`Metrics failed: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * GET /api/project/files?project_id=X
+ * Returns nested file tree of indexed sources.
+ */
+export async function getProjectFiles(project_id = 'default') {
+  const res = await fetch(`${BASE}/api/project/files?project_id=${encodeURIComponent(project_id)}`);
+  if (!res.ok) throw new Error(`Files failed: ${res.status}`);
   return res.json();
 }
 

@@ -153,6 +153,9 @@ class ProjectQueryRequest(BaseModel):
     question: str = Field(..., min_length=3, max_length=2000)
     project_id: str = Field(default="default")
     top_k: int = Field(default=5, ge=1, le=20)
+    selected_files: list[str] = Field(default_factory=list)
+    selected_folders: list[str] = Field(default_factory=list)
+    scope_mode: Literal["STRICT", "PREFER", "GLOBAL"] = "GLOBAL"
 
 
 class StructuredHit(BaseModel):

@@ -63,6 +63,14 @@ const useAppStore = create(
             selectedFaultId: null,
             setSelectedFaultId(id) { set({ selectedFaultId: id }); },
 
+            // ── Scope Context ─────────────────────────────────────────────
+            selectedFiles: [],
+            selectedFolders: [],
+            scopeMode: 'GLOBAL', // GLOBAL | PREFER | STRICT
+            setSelectedFiles: (files) => set({ selectedFiles: files }),
+            setSelectedFolders: (folders) => set({ selectedFolders: folders }),
+            setScopeMode: (mode) => set({ scopeMode: mode }),
+
             // ── Global reset ──────────────────────────────────────────────
             async resetAll() {
                 // Reset backend project index
@@ -76,6 +84,9 @@ const useAppStore = create(
                     faultDataset: null,
                     analysisResults: {},
                     selectedFaultId: null,
+                    selectedFiles: [],
+                    selectedFolders: [],
+                    scopeMode: 'GLOBAL',
                 });
             },
         }),
@@ -89,6 +100,9 @@ const useAppStore = create(
                 faultDataset: state.faultDataset,
                 analysisResults: state.analysisResults,
                 selectedFaultId: state.selectedFaultId,
+                selectedFiles: state.selectedFiles,
+                selectedFolders: state.selectedFolders,
+                scopeMode: state.scopeMode,
             }),
         }
     )

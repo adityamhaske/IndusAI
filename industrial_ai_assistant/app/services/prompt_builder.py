@@ -44,7 +44,7 @@ def build(
     intent_labels: list[str],
     structured_hits: list[StructuredHit],
     semantic_chunks: list[ScoredChunk],
-) -> str:
+) -> tuple[str, bool, int]:
     """
     Build the LLM prompt. Enforces token budget.
     Semantic chunks are truncated from the bottom if budget is exceeded.
@@ -79,6 +79,9 @@ def build(
     sem_lines: list[str] = ["## DOCUMENTATION CONTEXT\n"]
     used_tokens = _estimate_tokens("## DOCUMENTATION CONTEXT\n")
 
+    used_chunks = 0
+    truncated = False
+
     for i, scored in enumerate(semantic_chunks, 1):
         chunk = scored.chunk
         title = chunk.section_title or chunk.source_file
@@ -92,9 +95,11 @@ def build(
             sem_lines.append(
                 f"(Truncated: {len(semantic_chunks) - i + 1} more sources not shown — token budget reached)\n"
             )
+            truncated = True
             break
         sem_lines.append(snippet)
         used_tokens += snippet_tokens
+        used_chunks += 1
 
     if len(sem_lines) == 1:  # only header added
         sem_lines.append("(No documentation context retrieved)\n")
@@ -108,8 +113,9 @@ def build(
     if total_tokens > MAX_TOKENS:
         # Hard trim as last resort
         prompt = prompt[:MAX_TOKENS * _CHARS_PER_TOKEN]
+        truncated = True
 
-    return prompt
+    return prompt, truncated, used_chunks
 
 
 def _estimate_tokens(text: str) -> int:

@@ -36,6 +36,7 @@ from app.models.project_models import (
     ScoredChunk,
     StructuredHit,
     QueryType,
+    SemanticChunk,
 )
 from app.services import query_classifier
 from app.services.project_context_manager import get_project_context_manager
@@ -71,33 +72,135 @@ class QueryOrchestrator:
         intent = query_classifier.classify(request.question)
         logger.info("[%s] Query intent: %s", project_id, intent.labels)
 
-        # ── Step 3: Structured lookup ─────────────────────────────────────────
+        # ── Scope Resolution ──────────────────────────────────────────────────
         si = get_structured_index(project_id)
-        structured_hits = _structured_lookup(request.question, intent, si)
-
-        # ── Step 4: Semantic retrieval (hybrid) ───────────────────────────────
         sem = get_semantic_index()
-        semantic_hits: list[ScoredChunk] = []
-        if intent.semantic_required:
-            try:
-                semantic_hits = sem.hybrid_search(
-                    query=request.question,
-                    project_id=project_id,
-                    top_k=request.top_k,
-                )
-            except Exception as exc:
-                logger.warning("Semantic retrieval failed: %s", exc)
 
-        # ── Step 5: Merge contexts (already ordered: structured first) ─────────
-        # (both lists are passed separately to PromptBuilder)
+        scope_mode = request.scope_mode
+        effective_scope: set[str] | None = None
+        context_scope_meta = {
+            "mode": scope_mode,
+            "files_selected": request.selected_files + request.selected_folders,
+            "files_used": [],
+            "truncated": False,
+            "total_candidates": 0,
+            "used_chunks": 0
+        }
+
+        if scope_mode in ("STRICT", "PREFER") and context_scope_meta["files_selected"]:
+            all_files = si.all_source_files()
+            try:
+                all_files.update(sem.all_source_files(project_id))
+            except Exception:
+                pass
+            
+            # Resolve exact files
+            resolved = set(request.selected_files)
+            for folder in request.selected_folders:
+                prefix = folder if folder.endswith("/") else folder + "/"
+                for f in all_files:
+                    if f == folder or f.startswith(prefix):
+                        resolved.add(f)
+            effective_scope = resolved
+            context_scope_meta["files_used"] = list(effective_scope)
+
+            # STRICT mode empty-scope circuit breaker
+            if scope_mode == "STRICT" and not effective_scope:
+                return ProjectQueryResponse(
+                    question=request.question,
+                    project_id=project_id,
+                    query_intent=intent,
+                    answer=json.dumps({
+                        "summary": "NO_RESULTS_IN_SCOPE: No valid indexed files matched your STRICT selection.",
+                        "root_causes": [],
+                        "recommended_actions": ["Select different files or switch to GLOBAL mode."],
+                        "supporting_evidence": [],
+                        "limitations": ["Search was blocked due to an empty context scope."],
+                        "confidence": "LOW",
+                    }),
+                    confidence="LOW",
+                    warnings=["STRICT mode active but no matching files found in index."],
+                    context_scope=context_scope_meta,
+                    prompt_version=PROMPT_VERSION,
+                )
+
+        # ── Fast-Path: File Explanation ─────────────────────────────────────────
+        is_fast_path = False
+        semantic_hits: list[ScoredChunk] = []
+        structured_hits: list[StructuredHit] = []
+        
+        if scope_mode == "STRICT" and effective_scope and len(effective_scope) == 1:
+            q_lower = request.question.lower()
+            if any(kw in q_lower for kw in ["explain", "describe", "summariz", "what is"]):
+                target_file = list(effective_scope)[0]
+                import os
+                if os.path.exists(target_file):
+                    if (os.path.getsize(target_file) / 4) < 8000:
+                        try:
+                            with open(target_file, "r", encoding="utf-8", errors="replace") as f:
+                                content = f.read()
+                            chunk = SemanticChunk(
+                                chunk_id="fast_path",
+                                content=content,
+                                source_file=target_file,
+                                section_title="FULL FILE CONTENT"
+                            )
+                            semantic_hits = [ScoredChunk(chunk=chunk, score=1.0, retrieval_method="exact_file")]
+                            is_fast_path = True
+                            context_scope_meta["total_candidates"] = 1
+                            context_scope_meta["used_chunks"] = 1
+                            logger.info("[%s] Triggered File Explanation Fast-Path for %s", project_id, target_file)
+                        except Exception as e:
+                            logger.warning("[%s] Fast-path failed to read file %s: %s", project_id, target_file, e)
+
+        if not is_fast_path:
+            # ── Step 3: Structured lookup ─────────────────────────────────────────
+            raw_structured_hits = _structured_lookup(request.question, intent, si)
+            for hit in raw_structured_hits:
+                source = hit.data.get("source_file", "")
+                if scope_mode == "STRICT" and effective_scope is not None:
+                    if source in effective_scope:
+                        structured_hits.append(hit)
+                else:
+                    structured_hits.append(hit)
+
+            # ── Step 4: Semantic retrieval (hybrid) ───────────────────────────────
+            if intent.semantic_required:
+                try:
+                    search_scope = effective_scope if scope_mode == "STRICT" else None
+                    semantic_hits = sem.hybrid_search(
+                        query=request.question,
+                        project_id=project_id,
+                        top_k=request.top_k * (3 if scope_mode == "PREFER" else 1),
+                        scope_files=search_scope,
+                    )
+                except Exception as exc:
+                    logger.warning("Semantic retrieval failed: %s", exc)
+
+            context_scope_meta["total_candidates"] = len(semantic_hits)
+
+            # PREFER mode boosting
+            if scope_mode == "PREFER" and effective_scope:
+                for hit in semantic_hits:
+                    if hit.chunk.source_file in effective_scope:
+                        hit.score *= 1.5
+                semantic_hits.sort(key=lambda x: x.score, reverse=True)
+                semantic_hits = semantic_hits[:request.top_k]
+
+            context_scope_meta["used_chunks"] = len(semantic_hits)
+
+        # ── Step 5: Merge contexts ───────────────────────────────────────────
+        # (Lists are passed separately to PromptBuilder)
 
         # ── Step 6: Build prompt ──────────────────────────────────────────────
-        prompt = build_prompt(
+        prompt, is_truncated, used_chunks = build_prompt(
             question=request.question,
             intent_labels=[l.value for l in intent.labels],
             structured_hits=structured_hits,
             semantic_chunks=semantic_hits,
         )
+        context_scope_meta["truncated"] = is_truncated
+        context_scope_meta["used_chunks"] = used_chunks
 
         # ── Step 7: LLM call ──────────────────────────────────────────────────
         t_llm = time.perf_counter()

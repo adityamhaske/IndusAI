@@ -160,6 +160,87 @@ def project_query(body: ProjectQueryRequest):
         )
 
 
+# ── GET /api/project/files ────────────────────────────────────────────────────
+
+@router.get("/files")
+def project_files(project_id: str = Query(default="default")):
+    """
+    Return a nested file tree of all indexed files for this project.
+    Only includes files successfully parsed by reading index metadata.
+    """
+    from app.indexes.structured_index import get_structured_index
+    from app.indexes.semantic_index import get_semantic_index
+    import os
+
+    si = get_structured_index(project_id)
+    files = si.all_source_files()
+
+    try:
+        sem = get_semantic_index()
+        files.update(sem.all_source_files(project_id))
+    except Exception:
+        pass
+
+    if not files:
+        return []
+
+    try:
+        common = os.path.commonpath(list(files))
+        if os.path.isfile(common):
+            common = os.path.dirname(common)
+    except ValueError:
+        common = ""
+
+    tree_dict = {}
+    for path in sorted(files):
+        if common and path.startswith(common):
+            rel_path = path[len(common):].lstrip("/")
+        else:
+            rel_path = path.lstrip("/")
+
+        if not rel_path:
+            continue
+
+        parts = rel_path.split("/")
+        current = tree_dict
+        for i, part in enumerate(parts):
+            is_file = (i == len(parts) - 1)
+            
+            if part not in current:
+                current[part] = {
+                    "name": part,
+                    "type": "file" if is_file else "folder",
+                    "path": path, # will fix folder path below
+                }
+                if not is_file:
+                    folder_idx = path.find(part, len(common) if common else 0)
+                    if folder_idx != -1:
+                        folder_path = path[:folder_idx + len(part)]
+                    else:
+                        folder_path = part
+                    current[part]["path"] = folder_path
+                    current[part]["children"] = {}
+                    
+            if not is_file:
+                current = current[part]["children"]
+
+    def _to_list(d: dict) -> list[dict]:
+        res = []
+        for k, v in d.items():
+            node = {
+                "name": v["name"],
+                "type": v["type"],
+                "path": v["path"]
+            }
+            if v["type"] == "folder":
+                node["children"] = _to_list(v.get("children", {}))
+            res.append(node)
+        res.sort(key=lambda x: (0 if x["type"] == "folder" else 1, x["name"].lower()))
+        return res
+
+    return _to_list(tree_dict)
+
+
 # ── GET /api/project/metrics ──────────────────────────────────────────────────
 
 @router.get("/metrics", response_model=ProjectMetrics)

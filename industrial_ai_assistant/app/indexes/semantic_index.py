@@ -104,9 +104,10 @@ class SemanticIndex:
         project_id: str,
         top_k: int = 5,
         file_type: Optional[str] = None,
+        scope_files: set[str] | None = None,
     ) -> list[ScoredChunk]:
         """Pure cosine vector search, filtered by project_id (mandatory)."""
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
 
         client = self._get_client()
         q_emb = self._embedder.embed_text(query)
@@ -114,6 +115,8 @@ class SemanticIndex:
         must = [FieldCondition(key="project_id", match=MatchValue(value=project_id))]
         if file_type:
             must.append(FieldCondition(key="file_type", match=MatchValue(value=file_type)))
+        if scope_files is not None:
+            must.append(FieldCondition(key="source_file", match=MatchAny(any=list(scope_files))))
 
         hits = client.search(
             collection_name=_QDRANT_COLLECTION,
@@ -131,6 +134,7 @@ class SemanticIndex:
         query: str,
         project_id: str,
         top_k: int = 5,
+        scope_files: set[str] | None = None,
     ) -> list[ScoredChunk]:
         """
         In-process BM25 over chunks stored for this project.
@@ -159,6 +163,8 @@ class SemanticIndex:
                 chunk = store.get(chunk_id)
                 if chunk is None:
                     continue
+                if scope_files is not None and chunk.source_file not in scope_files:
+                    continue
                 dl = len(_tokenise(chunk.content))
                 norm_tf = tf * (k1 + 1) / (tf + k1 * (1 - b + b * dl / avg_len))
                 scores[chunk_id] += idf * norm_tf
@@ -178,14 +184,15 @@ class SemanticIndex:
         project_id: str,
         top_k: int = 5,
         file_type: Optional[str] = None,
+        scope_files: set[str] | None = None,
     ) -> list[ScoredChunk]:
         """
         Reciprocal Rank Fusion of BM25 + vector results.
         RRF formula: score = Σ 1/(k + rank)  with k=60.
         """
         k_rrf = 60
-        vector_hits = self.vector_search(query, project_id, top_k=top_k * 2, file_type=file_type)
-        bm25_hits   = self.bm25_search(query, project_id, top_k=top_k * 2)
+        vector_hits = self.vector_search(query, project_id, top_k=top_k * 2, file_type=file_type, scope_files=scope_files)
+        bm25_hits   = self.bm25_search(query, project_id, top_k=top_k * 2, scope_files=scope_files)
 
         rrf: dict[str, float] = {}
         seen_chunks: dict[str, ScoredChunk] = {}
@@ -213,6 +220,11 @@ class SemanticIndex:
     def collection_size(self, project_id: str) -> int:
         """Number of chunks indexed for this project."""
         return len(self._chunk_store.get(project_id, {}))
+
+    def all_source_files(self, project_id: str) -> set[str]:
+        """Return all unique source_file paths that have at least one chunk indexed."""
+        store = self._chunk_store.get(project_id, {})
+        return {chunk.source_file for chunk in store.values() if chunk.source_file}
 
     def delete_project(self, project_id: str) -> None:
         """Remove all Qdrant points and BM25 data for this project."""
