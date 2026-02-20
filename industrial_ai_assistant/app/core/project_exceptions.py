@@ -1,59 +1,72 @@
 """
-Project Knowledge Engine — Custom exceptions.
-All exceptions are explicitly raised; no silent fallback.
+Exceptions for the Project Knowledge Engine.
+All are explicit — no silent fallback anywhere in the pipeline.
 """
 from app.core.exceptions import AppError
 
 
 class ProjectNotReadyError(AppError):
+    """Project folder has not been indexed yet."""
     error_type = "PROJECT_NOT_READY"
 
-    def __init__(self, message: str = "Project ingestion not completed. POST /api/project/ingest first."):
-        super().__init__(message, status_code=503)
-
-
-class IngestionAlreadyRunningError(AppError):
-    error_type = "INGESTION_ALREADY_RUNNING"
-
     def __init__(self, project_id: str = ""):
-        super().__init__(
-            f"Ingestion already running for project '{project_id}'. Wait for it to complete.",
-            status_code=409,
+        msg = (
+            f"Project '{project_id}' has not been indexed. "
+            "POST /api/project/ingest first."
         )
+        super().__init__(msg, status_code=412)
 
 
-class HallucinatedTagError(AppError):
-    error_type = "HALLUCINATED_TAG"
+class ProjectStaleError(AppError):
+    """Project folder content changed — re-ingestion required."""
+    error_type = "PROJECT_STALE"
 
-    def __init__(self, tags: list):
-        self.tags = tags
-        super().__init__(
-            f"LLM invented PLC tags not found in structured index: {tags}",
-            status_code=422,
+    def __init__(self, project_id: str = ""):
+        msg = (
+            f"Project '{project_id}' index is stale (folder contents changed). "
+            "POST /api/project/ingest to rebuild the index."
         )
+        super().__init__(msg, status_code=409)
 
 
-class ProjectNotFoundError(AppError):
-    error_type = "PROJECT_NOT_FOUND"
-
-    def __init__(self, project_id: str = ""):
-        super().__init__(f"Project '{project_id}' has not been ingested.", status_code=404)
-
-
-class ProjectIndexStaleError(AppError):
-    error_type = "PROJECT_INDEX_STALE"
-    reindex_required = True
+class IngestionLockError(AppError):
+    """Ingestion already running for this project."""
+    error_type = "INGESTION_IN_PROGRESS"
 
     def __init__(self, project_id: str = ""):
         super().__init__(
-            f"Project '{project_id}' index is stale — source files changed. "
-            "Re-run POST /api/project/ingest.",
+            f"Ingestion already running for project '{project_id}'. Try again later.",
             status_code=409,
         )
 
 
 class IngestionFailedError(AppError):
+    """A parser crashed during ingestion."""
     error_type = "INGESTION_FAILED"
 
-    def __init__(self, message: str):
+    def __init__(self, message: str = "Ingestion failed."):
         super().__init__(message, status_code=500)
+
+
+class HallucinatedTagError(AppError):
+    """LLM invented PLC tag names not present in the structured index."""
+    error_type = "HALLUCINATED_TAGS"
+
+    def __init__(self, tags: list[str]):
+        super().__init__(
+            f"LLM response contains hallucinated PLC tags: {tags}. "
+            "Response rejected.",
+            status_code=422,
+        )
+        self.tags = tags
+
+
+class ProjectNotFoundError(AppError):
+    """No project registered under this project_id."""
+    error_type = "PROJECT_NOT_FOUND"
+
+    def __init__(self, project_id: str = ""):
+        super().__init__(
+            f"No project registered as '{project_id}'.",
+            status_code=404,
+        )

@@ -1,0 +1,244 @@
+🔴 1️⃣ In-Memory StructuredIndex (Scalability Risk)
+
+You wrote:
+
+In-memory structured store.
+
+Question:
+
+What happens when project has:
+
+12,000 tags?
+
+800 routines?
+
+200 PDFs?
+
+20,000 semantic chunks?
+
+Memory explodes silently.
+
+L9 fix:
+
+Add:
+
+Explicit memory metrics
+
+Max tag threshold
+
+Optional persistence strategy (v2)
+
+Project size warning in status
+
+Add to plan:
+
+StructuredIndex.stats() returns memory footprint.
+
+🔴 2️⃣ project_hash Strategy Is Weak
+
+You said:
+
+SHA-256 of sorted file list + mtimes
+
+This is fragile.
+
+If file content changes but mtime doesn’t update → no detection.
+
+L9 improvement:
+
+Hash file contents for smaller files
+
+Use content fingerprint sampling for large files
+
+Store project_hash + file_count
+
+This matters for re-index correctness.
+
+🔴 3️⃣ Hallucination Guard Is Too Naïve
+
+Your current guard:
+
+Regex: [A-Z][A-Z0-9_]{2,}
+
+
+Problems:
+
+False positives
+
+Misses lowercase tags
+
+Misses scoped tags (Program:Tag)
+
+Misses dotted tags (Motor.Speed)
+
+Better approach:
+
+Extract candidates
+
+Compare against actual tag set using fuzzy matching threshold
+
+Only fail if candidate not in tag index
+
+This needs improvement.
+
+🔴 4️⃣ QueryClassifier Is Too Static
+
+Rule-based is good for v1.
+
+But:
+
+What about:
+
+“Why does Motor_Speed oscillate when RIO 3 faults?”
+
+That’s mixed query.
+
+L9 fix:
+
+Allow multi-label classification.
+
+Query may require:
+
+TAG_LOOKUP
+
+SYSTEM_FLOW
+
+Or:
+
+Return structured:
+
+QueryIntent:
+  structured_required=True
+  semantic_required=True
+  progress_required=False
+
+
+This avoids rigid routing.
+
+🔴 5️⃣ Semantic Retrieval Needs Hybrid Mode
+
+Right now:
+
+search(query, project_id, top_k, file_type_filter)
+
+This is pure vector search.
+
+Industrial systems require hybrid:
+
+Keyword search for exact tag
+
+Vector search for semantic flow
+
+Add to plan:
+
+HybridRetriever:
+  - BM25 keyword search
+  - Vector similarity
+  - Merge + dedupe
+
+
+Without this, you’ll miss exact string matches.
+
+🔴 6️⃣ No LLM Output Schema Enforcement
+
+You validate tags.
+
+But you don’t enforce structured schema.
+
+You need:
+
+ProjectQueryResponse(BaseModel):
+  summary: str
+  structured_hits: list
+  documentation_sources: list
+  reasoning: str
+  confidence: Literal["LOW","MEDIUM","HIGH"]
+
+
+Without schema enforcement, answers will degrade over time.
+
+🔴 7️⃣ No Token Control Strategy
+
+Project RAG can easily overflow context.
+
+You must:
+
+Cap semantic chunks
+
+Truncate structured content
+
+Limit routine content length
+
+Add token estimation
+
+Add:
+
+PromptBuilder.enforce_token_budget()
+
+
+This is essential.
+
+🔴 8️⃣ No Ingestion Concurrency Guard
+
+If user triggers ingestion twice?
+
+Add:
+
+Ingestion lock per project_id
+
+
+Fail if ingestion already running.
+
+🟡 Improvements To Add
+🟡 Add Observability
+
+Add:
+
+GET /api/project/metrics
+
+
+Return:
+
+embedding_count
+
+vector_db_collection_size
+
+structured_index_size
+
+memory_usage
+
+ingestion_duration
+
+L9 loves measurable systems.
+
+🟡 Add Project Scope Enforcement in SemanticIndex
+
+Double check:
+
+Every upsert must include:
+
+metadata: {project_id}
+
+
+And every search must filter by project_id.
+
+No exceptions.
+
+🟡 Add Prompt Versioning
+
+Include in response:
+
+prompt_version: "project_v1.0"
+
+
+Critical for debugging regressions.
+
+🟡 Add Reindex Strategy
+
+If project_hash changes:
+
+Mark index stale
+
+Require reingestion
+
+Do not silently reuse old index

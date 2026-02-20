@@ -1,216 +1,257 @@
 """
-ProjectIngestionPipeline — Walks a project folder and populates indexes.
+ProjectIngestionPipeline — walks a project folder and populates
+StructuredIndex + SemanticIndex.
 
-Design:
-  - threading.Lock per project_id (409 if already ingesting)
-  - File classification by extension → typed parsers
-  - Structured artifacts → StructuredIndex
-  - Semantic chunks → SemanticIndex
-  - Full metrics: files_indexed, failed, tags, routines, chunks, duration_s, errors
-  - Never silently swallows failures at file level; logs every error
+Concurrency guard:
+  asyncio.Lock per project_id — raises IngestionLockError if lock held.
+
+File routing:
+  .L5X / .l5x   → L5XParser    → StructuredIndex (tags, routines, AOIs)
+                                 + SemanticIndex   (routine snippets)
+  .xlsx / .xls   → ExcelParser  → StructuredIndex (IO rows)
+                                 + SemanticIndex   (IO summaries)
+  .pdf           → PdfParser    → SemanticIndex
+  .txt/.md/.csv  → TextParser   → SemanticIndex
+  binary/unknown → SKIP (logged)
 """
+from __future__ import annotations
+
+import asyncio
+import hashlib
 import logging
-import threading
 import time
 from pathlib import Path
-from typing import Dict, Optional
 
-from app.core.project_exceptions import IngestionAlreadyRunningError
+from app.core.project_exceptions import IngestionLockError
 from app.indexes.semantic_index import get_semantic_index
-from app.indexes.structured_index import get_structured_index
-from app.models.project_models import IngestionResult
+from app.indexes.structured_index import clear_structured_index, get_structured_index
+from app.models.project_models import (
+    IngestionResult,
+    SemanticChunk,
+    StructuredHit,
+)
+from app.parsers import excel_parser, l5x_parser, pdf_parser, text_parser
+from app.services.project_context_manager import get_project_context_manager
 
 logger = logging.getLogger(__name__)
 
-# ── Path exclusion patterns ───────────────────────────────────────────────────
-_SKIP_DIRS = {"__pycache__", ".git", "node_modules", "venv", ".venv",
-              "dist", "build", ".pytest_cache", ".idea", ".vscode"}
+# Extensions skipped entirely (binaries, build artifacts)
+_SKIP_EXTENSIONS = {
+    ".exe", ".dll", ".pdb", ".obj", ".bin", ".pyc", ".so", ".class",
+    ".zip", ".tar", ".gz", ".rar", ".7z", ".db", ".sqlite", ".bak",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg",
+    ".eot", ".ttf", ".woff", ".woff2",
+}
+_SKIP_DIRS = {"venv", ".venv", "__pycache__", ".git", "node_modules", "dist", "build"}
 
-_SKIP_SUFFIXES = {".pyc", ".pyo", ".class", ".o", ".bin",
-                  ".exe", ".dll", ".so", ".dylib", ".db", ".sqlite",
-                  ".zip", ".tar", ".gz", ".bz2", ".rar", ".7z",
-                  ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico",
-                  ".mp4", ".avi", ".mov", ".mp3", ".wav"}
+# Extension → file_type tag stored in SemanticIndex
+_TYPE_MAP = {
+    ".l5x": "l5x", ".xlsx": "excel", ".xls": "excel",
+    ".pdf": "pdf",
+    ".txt": "txt", ".md": "txt", ".csv": "txt",
+}
 
-# ── File type classification ──────────────────────────────────────────────────
-_L5X_EXTS  = {".l5x"}
-_EXCEL_EXTS = {".xlsx", ".xls"}
-_PDF_EXTS   = {".pdf"}
-_TEXT_EXTS  = {".txt", ".md", ".rst", ".csv"}
+# asyncio lock registry
+_locks: dict[str, asyncio.Lock] = {}
+_lock_registry_lock = asyncio.Lock()
+
+
+async def _get_lock(project_id: str) -> asyncio.Lock:
+    async with _lock_registry_lock:
+        if project_id not in _locks:
+            _locks[project_id] = asyncio.Lock()
+        return _locks[project_id]
 
 
 class ProjectIngestionPipeline:
-    """Ingests a project folder into StructuredIndex + SemanticIndex."""
+    """Orchestrates full project ingestion with concurrency guard."""
 
-    def __init__(self):
-        self._locks: Dict[str, threading.Lock] = {}
-        self._global_lock = threading.Lock()
-
-    def _get_lock(self, project_id: str) -> threading.Lock:
-        with self._global_lock:
-            if project_id not in self._locks:
-                self._locks[project_id] = threading.Lock()
-            return self._locks[project_id]
-
-    def ingest(self, folder_path: str, project_id: str) -> IngestionResult:
+    async def ingest(self, folder_path: str, project_id: str) -> IngestionResult:
         """
-        Full ingestion pipeline.
-        Raises IngestionAlreadyRunningError(409) if already running for this project.
+        Entry point. Returns IngestionResult.
+        Raises IngestionLockError if already running for this project.
         """
-        lock = self._get_lock(project_id)
-        if not lock.acquire(blocking=False):
-            raise IngestionAlreadyRunningError(project_id)
+        lock = await _get_lock(project_id)
+        if lock.locked():
+            raise IngestionLockError(project_id)
 
+        async with lock:
+            return await self._run_ingestion(folder_path, project_id)
+
+    async def _run_ingestion(self, folder_path: str, project_id: str) -> IngestionResult:
+        ctx = get_project_context_manager()
         t0 = time.perf_counter()
+
+        # Register folder + compute hash (raises ValueError if bad path)
+        ctx.set_project(folder_path, project_id)
+        ctx.mark_indexing(project_id)
+
         result = IngestionResult(
             project_id=project_id,
+            project_hash=ctx.get_status(project_id).project_hash,
             folder=folder_path,
-            project_hash="",
         )
 
-        try:
-            from app.services.project_context_manager import get_project_context_manager
-            ctx = get_project_context_manager()
-            ph, fc = ctx.set_project(folder_path, project_id)
-            result.project_hash = ph
-            result.files_scanned = fc
+        # Clear previous indexes
+        clear_structured_index(project_id)
+        si = get_structured_index(project_id)
+        sem = get_semantic_index()
+        sem.delete_project(project_id)
 
-            # Reset existing indexes
-            get_structured_index(project_id).clear()
-            get_semantic_index().delete_project(project_id)
+        folder = Path(folder_path)
+        all_files = _collect_files(folder)
+        result.files_scanned = len(all_files)
 
-            # Walk and ingest
-            folder = Path(folder_path)
-            self._walk(folder, project_id, result)
-
-            result.duration_s = round(time.perf_counter() - t0, 2)
-            ctx.mark_ingested(project_id, result)
-
-            logger.info(
-                "Ingestion complete: project=%s files=%d tags=%d routines=%d chunks=%d errors=%d %.1fs",
-                project_id, result.files_indexed, result.tags_indexed,
-                result.routines_indexed, result.semantic_chunks,
-                result.files_failed, result.duration_s,
-            )
-        except Exception as exc:
-            result.errors.append(f"Pipeline fatal error: {exc}")
-            logger.exception("Ingestion fatal error for project '%s'", project_id)
-        finally:
-            lock.release()
-
-        return result
-
-    def _walk(self, folder: Path, project_id: str, result: IngestionResult) -> None:
-        """Recursively walk folder, classify files, dispatch to parsers."""
-        s_idx = get_structured_index(project_id)
-        sem_idx = get_semantic_index()
-
-        for path in sorted(folder.rglob("*")):
-            if path.is_dir():
-                if path.name in _SKIP_DIRS:
-                    continue
-                continue
-
-            if not path.is_file():
-                continue
-
-            # Skip hidden and excluded suffixes
-            if path.name.startswith("."):
-                continue
-            if path.suffix.lower() in _SKIP_SUFFIXES:
-                continue
-            if any(part in _SKIP_DIRS for part in path.parts):
-                continue
-
-            ext = path.suffix.lower()
+        for file_path in all_files:
+            ext = file_path.suffix.lower()
             try:
-                if ext in _L5X_EXTS:
-                    self._ingest_l5x(path, project_id, s_idx, sem_idx, result)
-                elif ext in _EXCEL_EXTS:
-                    self._ingest_excel(path, project_id, s_idx, sem_idx, result)
-                elif ext in _PDF_EXTS:
-                    self._ingest_pdf(path, project_id, sem_idx, result)
-                elif ext in _TEXT_EXTS:
-                    self._ingest_text(path, project_id, sem_idx, result)
+                if ext in (".l5x",):
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, self._ingest_l5x, file_path, project_id, si, sem, result
+                    )
+                elif ext in (".xlsx", ".xls"):
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, self._ingest_excel, file_path, project_id, si, sem, result
+                    )
+                elif ext == ".pdf":
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, self._ingest_pdf, file_path, project_id, sem, result
+                    )
+                elif ext in (".txt", ".md", ".csv"):
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, self._ingest_text, file_path, project_id, sem, result
+                    )
                 else:
-                    logger.debug("Skipping unsupported file type: %s", path.name)
+                    result.files_skipped += 1
                     continue
 
                 result.files_indexed += 1
+
             except Exception as exc:
-                err = f"{path.relative_to(folder)}: {exc}"
-                result.errors.append(err)
+                msg = f"Failed to ingest {file_path.name}: {exc}"
+                logger.error(msg, exc_info=True)
+                result.errors.append(msg)
                 result.files_failed += 1
-                logger.warning("Ingestion error — %s", err)
 
-    def _ingest_l5x(self, path, project_id, s_idx, sem_idx, result):
-        from app.parsers import l5x_parser
-        tags, routines, aois = l5x_parser.parse(path)
-        s_idx.load_tags(tags)
-        s_idx.load_routines(routines)
-        s_idx.load_aois(aois)
-        result.tags_indexed += len(tags)
-        result.routines_indexed += len(routines)
-        result.aois_indexed += len(aois)
-
-        # Also index routine content semantically
-        from app.models.project_models import SemanticChunk
-        chunks = [
-            SemanticChunk(
-                chunk_id=f"l5x_{r.program}_{r.name}",
-                project_id=project_id,
-                content=f"Routine: {r.name} (Program: {r.program})\n{r.content[:800]}",
-                source_file=str(path),
-                section_title=f"{r.program}.{r.name}",
-                file_type="l5x",
+        # Size warnings
+        si_stats = si.stats()
+        result.warnings.extend(si_stats.warnings)
+        if si_stats.at_capacity:
+            result.warnings.append(
+                f"StructuredIndex at capacity. Some records were dropped."
             )
-            for r in routines if r.content
+
+        result.duration_ms = (time.perf_counter() - t0) * 1000
+        ctx.mark_ready(project_id, result)
+
+        logger.info(
+            "[%s] Ingestion complete: %d files, %d tags, %d routines, "
+            "%d IO rows, %d chunks in %.0fms",
+            project_id, result.files_indexed, result.tags_indexed,
+            result.routines_indexed, result.io_rows_indexed,
+            result.semantic_chunks_indexed, result.duration_ms,
+        )
+        return result
+
+    # ── Per-type handlers ──────────────────────────────────────────────────────
+
+    def _ingest_l5x(self, path: Path, project_id: str, si, sem, result: IngestionResult):
+        parsed = l5x_parser.parse(path)
+        result.warnings.extend(parsed.warnings)
+
+        for tag in parsed.tags:
+            si.add_tag(tag)
+            result.tags_indexed += 1
+
+        for rtn in parsed.routines:
+            si.add_routine(rtn)
+            result.routines_indexed += 1
+            # Also add routine content to semantic for "explain routine" queries
+            if rtn.content_snippet:
+                chunk = _make_chunk(
+                    f"{rtn.content_snippet} [Routine: {rtn.name}]",
+                    str(path), rtn.name, "l5x", project_id
+                )
+                sem.upsert_chunks([chunk], project_id)
+                result.semantic_chunks_indexed += 1
+
+        for aoi in parsed.aois:
+            si.add_aoi(aoi)
+
+    def _ingest_excel(self, path: Path, project_id: str, si, sem, result: IngestionResult):
+        parsed = excel_parser.parse(path)
+        result.warnings.extend(parsed.warnings)
+
+        for io in parsed.io_rows:
+            si.add_io(io)
+            result.io_rows_indexed += 1
+            # Semantic chunk: one sentence per IO row for keyword matching
+            text = f"Slot {io.slot} Rack {io.rack} Module {io.module}: {io.description} Tag={io.tag_name}"
+            chunk = _make_chunk(text, str(path), f"IO Slot {io.slot}", "excel", project_id)
+            sem.upsert_chunks([chunk], project_id)
+            result.semantic_chunks_indexed += 1
+
+    def _ingest_pdf(self, path: Path, project_id: str, sem, result: IngestionResult):
+        parsed = pdf_parser.parse(path)
+        result.warnings.extend(parsed.warnings)
+        chunks = [
+            _make_chunk(c.content, str(path), c.title, "pdf", project_id, page=c.page)
+            for c in parsed.chunks
         ]
         if chunks:
-            n = sem_idx.upsert_chunks(project_id, chunks)
-            result.semantic_chunks += n
+            sem.upsert_chunks(chunks, project_id)
+            result.semantic_chunks_indexed += len(chunks)
 
-    def _ingest_excel(self, path, project_id, s_idx, sem_idx, result):
-        from app.parsers import excel_parser
-        io_records = excel_parser.parse(path)
-        s_idx.load_io(io_records)
-        result.io_rows_indexed += len(io_records)
-
-        # Semantic: one chunk per IO table
-        from app.models.project_models import SemanticChunk
-        if io_records:
-            summary = "\n".join(
-                f"Slot {r.slot} Rack {r.rack}: {r.module} — {r.description} [{r.tag_name}]"
-                for r in io_records[:100]
-            )
-            chunk = SemanticChunk(
-                chunk_id=f"excel_{path.stem}",
-                project_id=project_id,
-                content=summary,
-                source_file=str(path),
-                section_title=path.stem,
-                file_type="excel",
-            )
-            n = sem_idx.upsert_chunks(project_id, [chunk])
-            result.semantic_chunks += n
-
-    def _ingest_pdf(self, path, project_id, sem_idx, result):
-        from app.parsers import pdf_parser
-        chunks = pdf_parser.parse(path, project_id)
+    def _ingest_text(self, path: Path, project_id: str, sem, result: IngestionResult):
+        parsed = text_parser.parse(path)
+        result.warnings.extend(parsed.warnings)
+        chunks = [
+            _make_chunk(c.content, str(path), path.stem, "txt", project_id)
+            for c in parsed.chunks
+        ]
         if chunks:
-            n = sem_idx.upsert_chunks(project_id, chunks)
-            result.semantic_chunks += n
-
-    def _ingest_text(self, path, project_id, sem_idx, result):
-        from app.parsers import text_parser
-        chunks = text_parser.parse(path, project_id)
-        if chunks:
-            n = sem_idx.upsert_chunks(project_id, chunks)
-            result.semantic_chunks += n
+            sem.upsert_chunks(chunks, project_id)
+            result.semantic_chunks_indexed += len(chunks)
 
 
-# ── Singleton ─────────────────────────────────────────────────────────────────
-_pipeline: Optional[ProjectIngestionPipeline] = None
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _collect_files(folder: Path) -> list[Path]:
+    """Recursively collect all processable files, skipping excluded dirs."""
+    files: list[Path] = []
+    try:
+        for item in folder.rglob("*"):
+            if item.is_file():
+                if any(part in _SKIP_DIRS for part in item.parts):
+                    continue
+                if item.suffix.lower() in _SKIP_EXTENSIONS:
+                    continue
+                files.append(item)
+    except PermissionError as exc:
+        logger.warning("Permission error during file walk: %s", exc)
+    return files
+
+
+def _make_chunk(
+    content: str, source_file: str, section_title: str,
+    file_type: str, project_id: str, page: int = 0,
+) -> SemanticChunk:
+    cid_raw = f"{project_id}:{source_file}:{section_title}:{content[:32]}"
+    chunk_id = hashlib.sha1(cid_raw.encode()).hexdigest()
+    return SemanticChunk(
+        chunk_id=chunk_id,
+        content=content,
+        source_file=source_file,
+        section_title=section_title,
+        file_type=file_type,
+        page=page,
+        project_id=project_id,
+    )
+
+
+# ── Singleton ──────────────────────────────────────────────────────────────────
+
+_pipeline: ProjectIngestionPipeline | None = None
 
 
 def get_ingestion_pipeline() -> ProjectIngestionPipeline:

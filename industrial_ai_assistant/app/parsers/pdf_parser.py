@@ -1,127 +1,143 @@
 """
-PDF Parser — Extracts sections from engineering PDFs.
+PDF parser — chunks by heading for industrial documentation.
 
-Strategy:
-  - Use pdfplumber for text extraction page-by-page
-  - Detect headings using ALL_CAPS or short-line + title-case heuristics
-  - Chunk by heading; max 1200 chars with 150-char overlap
-  - Returns [{title, content, page, source_file}]
+Uses pdfplumber (already in requirements.txt).
+Heading detection: ALL CAPS lines, lines ending with ':', or lines
+whose word count ≤ 6 and are preceded by a blank line.
 """
+from __future__ import annotations
+
 import logging
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
-
-from app.models.project_models import SemanticChunk
 
 logger = logging.getLogger(__name__)
 
-_MAX_CHUNK_CHARS = 1_200
-_OVERLAP_CHARS = 150
-_MIN_HEADING_WORDS = 2
-_MAX_HEADING_WORDS = 12
+_MAX_CHUNK_CHARS = 800
+_MIN_CHUNK_CHARS = 40   # discard too-short fragments
 
 
-def parse(path: str | Path, project_id: str = "default") -> List[SemanticChunk]:
+@dataclass
+class PdfChunk:
+    title: str
+    content: str
+    page: int
+    source_file: str
+
+
+@dataclass
+class PdfParseResult:
+    chunks: list[PdfChunk] = field(default_factory=list)
+    source_file: str = ""
+    page_count: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+
+def parse(file_path: str | Path) -> PdfParseResult:
     """
-    Parse a PDF into heading-chunked SemanticChunks.
-
-    Returns:
-        List of SemanticChunk — one per section/chunk.
+    Parse a PDF into heading-chunked text blocks.
+    Never raises — returns warnings in result.
     """
     try:
         import pdfplumber
-    except ImportError as exc:
-        raise ImportError("pdfplumber is required: pip install pdfplumber") from exc
+    except ImportError:
+        return PdfParseResult(
+            source_file=str(file_path),
+            warnings=["pdfplumber not installed — PDF parsing skipped."],
+        )
 
-    source = str(path)
-    chunks: List[SemanticChunk] = []
+    path = Path(file_path)
+    result = PdfParseResult(source_file=str(path))
 
     try:
-        with pdfplumber.open(source) as pdf:
-            sections: List[dict] = []   # [{title, content, page}]
-            current_title = "Introduction"
-            current_content: List[str] = []
-            current_page = 1
-
-            for page in pdf.pages:
-                text = page.extract_text() or ""
-                for line in text.splitlines():
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    if _is_heading(stripped):
-                        # Save current section
-                        if current_content:
-                            sections.append({
-                                "title": current_title,
-                                "content": " ".join(current_content),
-                                "page": current_page,
-                            })
-                        current_title = stripped
-                        current_content = []
-                        current_page = page.page_number
-                    else:
-                        current_content.append(stripped)
-
-            # Flush last section
-            if current_content:
-                sections.append({
-                    "title": current_title,
-                    "content": " ".join(current_content),
-                    "page": current_page,
-                })
-
-        # Split long sections into overlapping chunks
-        for section in sections:
-            sub_chunks = _split_to_chunks(section["content"], _MAX_CHUNK_CHARS, _OVERLAP_CHARS)
-            for i, text in enumerate(sub_chunks):
-                chunk_id = f"{Path(source).stem}_{section['page']}_{i}"
-                chunks.append(SemanticChunk(
-                    chunk_id=chunk_id,
-                    project_id=project_id,
-                    content=text,
-                    source_file=source,
-                    section_title=section["title"],
-                    file_type="pdf",
-                    page=section["page"],
-                ))
-
+        pdf = pdfplumber.open(path)
     except Exception as exc:
-        raise ValueError(f"PDF parse error for {source}: {exc}") from exc
+        result.warnings.append(f"Cannot open PDF {path.name}: {exc}")
+        return result
 
-    logger.debug("PDF %s → %d chunks", Path(source).name, len(chunks))
-    return chunks
+    with pdf:
+        result.page_count = len(pdf.pages)
+        current_heading = path.stem       # default heading = filename
+        current_lines: list[str] = []
+        current_page = 1
 
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            page_num = page.page_number
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
 
-_SECTION_NUM_RE = re.compile(r"^\d+(\.\d+)*\s+\w")  # "3.2 Section Title"
+                if _is_heading(line):
+                    # Flush current chunk
+                    _flush(result.chunks, current_heading,
+                           current_lines, current_page, str(path))
+                    current_heading = line
+                    current_lines = []
+                    current_page = page_num
+                else:
+                    current_lines.append(line)
+
+                    # Auto-split long accumulations
+                    if sum(len(l) for l in current_lines) >= _MAX_CHUNK_CHARS:
+                        _flush(result.chunks, current_heading,
+                               current_lines, current_page, str(path))
+                        current_lines = []
+
+            current_page = page_num
+
+        _flush(result.chunks, current_heading, current_lines, current_page, str(path))
+
+    logger.debug("PDF parsed: %s → %d chunks across %d pages",
+                 path.name, len(result.chunks), result.page_count)
+    return result
 
 
 def _is_heading(line: str) -> bool:
-    """Heuristically detect heading lines."""
-    words = line.split()
-    n = len(words)
-    if n < _MIN_HEADING_WORDS or n > _MAX_HEADING_WORDS:
+    """
+    True if the line looks like a section heading.
+    Heuristics (ordered by reliability):
+      1. All uppercase and mixed ≥ 3 chars
+      2. Line ends with ':'
+      3. Numbered section pattern like '1.2.3 Title'
+    """
+    stripped = line.strip(".\t ")
+    if len(stripped) < 3:
         return False
-    if line.isupper() and n <= 8:
+
+    if re.match(r"^[A-Z0-9 /,\-]+$", stripped) and len(stripped) <= 80:
         return True
-    if _SECTION_NUM_RE.match(line):
+
+    if stripped.endswith(":") and len(stripped.split()) <= 8:
         return True
-    # Title case (most words capitalize)
-    upper_words = sum(1 for w in words if w and w[0].isupper())
-    return upper_words >= max(2, n // 2) and not line.endswith(".")
+
+    if re.match(r"^\d+(\.\d+)*\s+[A-Z]", stripped) and len(stripped.split()) <= 10:
+        return True
+
+    return False
 
 
-def _split_to_chunks(text: str, max_chars: int, overlap: int) -> List[str]:
-    """Split long text into overlapping fixed-size chunks."""
-    if len(text) <= max_chars:
-        return [text]
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + max_chars
-        chunks.append(text[start:end])
-        start += max_chars - overlap
-    return chunks
+def _flush(
+    chunks: list[PdfChunk],
+    heading: str,
+    lines: list[str],
+    page: int,
+    source: str,
+) -> None:
+    content = " ".join(lines).strip()
+    if len(content) < _MIN_CHUNK_CHARS:
+        return
+    # Split into sub-chunks if still too large
+    while len(content) > _MAX_CHUNK_CHARS:
+        chunks.append(PdfChunk(
+            title=heading,
+            content=content[:_MAX_CHUNK_CHARS],
+            page=page,
+            source_file=source,
+        ))
+        content = content[_MAX_CHUNK_CHARS - 50:]   # 50-char overlap
+    if content:
+        chunks.append(PdfChunk(title=heading, content=content, page=page, source_file=source))

@@ -1,62 +1,79 @@
 """
-Text Parser — plain text, Markdown, CSV files.
+Text / plain-text parser — sliding window chunking.
 
-Uses a sliding window (800 chars, 200 overlap) to produce SemanticChunks.
+Handles: .txt, .md, .csv, and any other text file.
+Window: 512 chars, overlap: 64 chars.
 """
-import logging
-from pathlib import Path
-from typing import List
+from __future__ import annotations
 
-from app.models.project_models import SemanticChunk
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_WINDOW = 800
-_OVERLAP = 200
-_ENCODINGS = ("utf-8", "latin-1", "cp1252")
+_WINDOW = 512
+_OVERLAP = 64
+_ENCODINGS = ["utf-8", "latin-1", "cp1252"]
 
 
-def parse(path: str | Path, project_id: str = "default") -> List[SemanticChunk]:
+@dataclass
+class TextChunk:
+    content: str
+    char_offset: int
+    source_file: str
+
+
+@dataclass
+class TextParseResult:
+    chunks: list[TextChunk] = field(default_factory=list)
+    source_file: str = ""
+    char_count: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+
+def parse(file_path: str | Path) -> TextParseResult:
     """
-    Read a text file and produce overlapping SemanticChunks.
-
-    Returns:
-        List of SemanticChunk.
-    Raises:
-        ValueError if file cannot be decoded.
+    Read a text file and return sliding-window chunks.
+    Tries multiple encodings — never raises.
     """
-    source = str(path)
-    text = _read_text(source)
+    path = Path(file_path)
+    result = TextParseResult(source_file=str(path))
 
-    chunks: List[SemanticChunk] = []
-    stem = Path(source).stem
-    start = 0
-    idx = 0
-    while start < len(text):
-        end = start + _WINDOW
-        content = text[start:end].strip()
-        if content:
-            chunks.append(SemanticChunk(
-                chunk_id=f"{stem}_{idx}",
-                project_id=project_id,
-                content=content,
-                source_file=source,
-                section_title="",
-                file_type="txt",
-                char_offset=start,
-            ))
-            idx += 1
-        start += _WINDOW - _OVERLAP
-
-    logger.debug("Text %s → %d chunks", Path(source).name, len(chunks))
-    return chunks
-
-
-def _read_text(source: str) -> str:
+    text: str | None = None
     for enc in _ENCODINGS:
         try:
-            with open(source, "r", encoding=enc) as f:
-                return f.read()
-        except (UnicodeDecodeError, LookupError):
+            text = path.read_text(encoding=enc)
+            break
+        except (UnicodeDecodeError, OSError):
             continue
-    raise ValueError(f"Could not decode {source} with encodings {_ENCODINGS}")
+
+    if text is None:
+        result.warnings.append(f"Could not decode {path.name} with any known encoding.")
+        return result
+
+    # Normalise whitespace runs
+    text = " ".join(text.split())
+    result.char_count = len(text)
+
+    if len(text) < 20:
+        result.warnings.append(f"{path.name} is too short to chunk ({len(text)} chars).")
+        return result
+
+    pos = 0
+    while pos < len(text):
+        end = min(pos + _WINDOW, len(text))
+        chunk_text = text[pos:end].strip()
+        if chunk_text:
+            result.chunks.append(TextChunk(
+                content=chunk_text,
+                char_offset=pos,
+                source_file=str(path),
+            ))
+        if end == len(text):
+            break
+        pos += _WINDOW - _OVERLAP
+
+    logger.debug("Text parsed: %s → %d chunks (%d chars)",
+                 path.name, len(result.chunks), result.char_count)
+    return result

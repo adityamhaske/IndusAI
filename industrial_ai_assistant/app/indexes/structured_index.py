@@ -1,162 +1,223 @@
 """
-StructuredIndex — In-memory exact-lookup store for PLC project artifacts.
+StructuredIndex — deterministic, in-memory lookup store.
+
+Holds: TagIndex, RoutineIndex, AOIIndex, IOIndex.
+NO vector search here — exact lookup only.
 
 Design:
-  - O(1) lookup for tags, routines, AOIs, IO records
-  - No vector search — structured data only
-  - Memory footprint tracking via sys.getsizeof
-  - MAX_TAGS guard (warning at 80%, error log at 100%)
-  - Thread-safe reads (writes assumed to happen only during ingestion)
+  - Thread-safe writes via threading.Lock
+  - Hard caps protect against runaway memory
+  - stats() returns actual memory footprint estimate
+  - all_tag_names() returns frozen set for O(1) membership test
 """
+from __future__ import annotations
+
 import logging
 import sys
-from typing import Dict, List, Optional
+import threading
+from dataclasses import dataclass, field
 
 from app.models.project_models import AOIRecord, IORecord, RoutineRecord, TagRecord
 
 logger = logging.getLogger(__name__)
 
-MAX_TAGS = 50_000
-_WARN_AT = int(MAX_TAGS * 0.80)
+# Hard limits
+MAX_TAGS     = 50_000
+MAX_ROUTINES = 5_000
+MAX_IO_ROWS  = 20_000
+
+# Warning thresholds
+WARN_TAGS = 25_000
 
 
-def _deep_sizeof(obj) -> int:
-    """Rough recursive size estimate in bytes."""
-    size = sys.getsizeof(obj)
-    if isinstance(obj, dict):
-        size += sum(_deep_sizeof(k) + _deep_sizeof(v) for k, v in obj.items())
-    elif isinstance(obj, (list, tuple, set, frozenset)):
-        size += sum(_deep_sizeof(i) for i in obj)
-    elif hasattr(obj, "__dict__"):
-        size += _deep_sizeof(vars(obj))
-    return size
+@dataclass
+class StructuredIndexStats:
+    tags: int = 0
+    routines: int = 0
+    aois: int = 0
+    io_rows: int = 0
+    memory_footprint_mb: float = 0.0
+    at_capacity: bool = False
+    warnings: list[str] = field(default_factory=list)
 
 
 class StructuredIndex:
-    """
-    Per-project in-memory structured index.
-    Contains four sub-indexes, each providing O(1) keyed lookup.
-    """
+    """In-memory index with exact-match lookup for PLC structured data."""
 
     def __init__(self, project_id: str):
         self.project_id = project_id
-        self._tags: Dict[str, TagRecord] = {}          # name → TagRecord
-        self._routines: Dict[str, RoutineRecord] = {}  # name → RoutineRecord
-        self._aois: Dict[str, AOIRecord] = {}          # name → AOIRecord
-        self._ios: Dict[str, IORecord] = {}            # "rack/slot" → IORecord
-        self._warnings: List[str] = []
+        self._lock = threading.Lock()
 
-    # ── Bulk load (called by ingestion pipeline) ──────────────────────────────
+        # Primary stores — lowercase key → record
+        self._tags: dict[str, TagRecord] = {}
+        self._routines: dict[str, RoutineRecord] = {}
+        self._aois: dict[str, AOIRecord] = {}
+        self._io: dict[str, IORecord] = {}
 
-    def load_tags(self, records: List[TagRecord]) -> None:
-        for r in records:
-            key = r.name.upper()
-            self._tags[key] = r
-        n = len(self._tags)
-        if n >= MAX_TAGS:
-            msg = f"[{self.project_id}] Tag count {n} reached MAX_TAGS={MAX_TAGS}. Index may be incomplete."
-            logger.error(msg)
-            self._warnings.append(msg)
-        elif n >= _WARN_AT:
-            msg = f"[{self.project_id}] Tag count {n} ≥ 80% of MAX_TAGS={MAX_TAGS}. Monitor memory."
-            logger.warning(msg)
-            self._warnings.append(msg)
+        # Cached frozen set of tag names (rebuilt on write)
+        self._tag_name_cache: frozenset[str] | None = None
 
-    def load_routines(self, records: List[RoutineRecord]) -> None:
-        for r in records:
-            self._routines[r.name.upper()] = r
+    # ── Write ─────────────────────────────────────────────────────────────────
 
-    def load_aois(self, records: List[AOIRecord]) -> None:
-        for r in records:
-            self._aois[r.name.upper()] = r
+    def add_tag(self, record: TagRecord) -> bool:
+        """Add a tag. Returns False (+ logs warning) if at capacity."""
+        with self._lock:
+            if len(self._tags) >= MAX_TAGS:
+                logger.warning(
+                    "[%s] StructuredIndex: MAX_TAGS (%d) reached — '%s' skipped.",
+                    self.project_id, MAX_TAGS, record.name,
+                )
+                return False
+            key = record.name.lower()
+            self._tags[key] = record
+            self._tag_name_cache = None   # invalidate
+            return True
 
-    def load_io(self, records: List[IORecord]) -> None:
-        for r in records:
-            k = r.key.upper() if r.key else r.slot.upper()
-            if k:
-                self._ios[k] = r
+    def add_routine(self, record: RoutineRecord) -> bool:
+        with self._lock:
+            if len(self._routines) >= MAX_ROUTINES:
+                logger.warning("[%s] MAX_ROUTINES reached.", self.project_id)
+                return False
+            self._routines[record.name.lower()] = record
+            return True
 
-    # ── Lookup methods ────────────────────────────────────────────────────────
+    def add_aoi(self, record: AOIRecord) -> bool:
+        with self._lock:
+            self._aois[record.name.lower()] = record
+            return True
 
-    def get_tag(self, name: str) -> Optional[TagRecord]:
-        """Exact tag lookup (case-insensitive)."""
-        return self._tags.get(name.upper())
+    def add_io(self, record: IORecord) -> bool:
+        with self._lock:
+            if len(self._io) >= MAX_IO_ROWS:
+                return False
+            # Key: "rack:slot" or just slot
+            key = f"{record.rack}:{record.slot}".lower() if record.rack else record.slot.lower()
+            self._io[key] = record
+            return True
 
-    def get_routine(self, name: str) -> Optional[RoutineRecord]:
-        """Exact routine lookup (case-insensitive)."""
-        return self._routines.get(name.upper())
+    # ── Exact lookup ──────────────────────────────────────────────────────────
 
-    def get_aoi(self, name: str) -> Optional[AOIRecord]:
-        """Exact AOI lookup (case-insensitive)."""
-        return self._aois.get(name.upper())
+    def get_tag(self, name: str) -> TagRecord | None:
+        """O(1) lookup. Case-insensitive."""
+        return self._tags.get(name.lower())
 
-    def get_io(self, slot: str, rack: str = "") -> Optional[IORecord]:
-        """Lookup by slot or rack/slot key (case-insensitive)."""
-        key = f"{rack}/{slot}".strip("/").upper() if rack else slot.upper()
-        return self._ios.get(key)
+    def get_routine(self, name: str) -> RoutineRecord | None:
+        return self._routines.get(name.lower())
 
-    def search_tags_prefix(self, prefix: str, limit: int = 20) -> List[TagRecord]:
-        """Return tags whose name starts with prefix (case-insensitive)."""
-        p = prefix.upper()
+    def get_aoi(self, name: str) -> AOIRecord | None:
+        return self._aois.get(name.lower())
+
+    def get_io(self, slot: str, rack: str = "") -> IORecord | None:
+        if rack:
+            record = self._io.get(f"{rack}:{slot}".lower())
+            if record:
+                return record
+        # Try slot as-is (may already contain rack prefix like "1:0")
+        record = self._io.get(slot.lower())
+        if record:
+            return record
+        # Try any IO record matching the slot suffix
+        slot_lower = slot.lower()
+        for key, rec in self._io.items():
+            if key == slot_lower or key.endswith(f":{slot_lower}"):
+                return rec
+        return None
+
+    # ── Prefix search ─────────────────────────────────────────────────────────
+
+    def search_tags_prefix(self, prefix: str, limit: int = 10) -> list[TagRecord]:
+        """Return up to `limit` tags whose name starts with `prefix` (case-insensitive)."""
+        p = prefix.lower()
         return [v for k, v in self._tags.items() if k.startswith(p)][:limit]
 
-    def all_tag_names(self) -> frozenset:
-        """Return all tag names as a frozenset (case-normalized to upper)."""
-        return frozenset(self._tags.keys())
+    def search_io_description(self, keyword: str, limit: int = 10) -> list[IORecord]:
+        kw = keyword.lower()
+        return [
+            v for v in self._io.values()
+            if kw in v.description.lower() or kw in v.tag_name.lower()
+        ][:limit]
 
-    def all_routine_names(self) -> frozenset:
-        return frozenset(self._routines.keys())
+    # ── Membership (hallucination guard) ──────────────────────────────────────
 
-    # ── Observability ─────────────────────────────────────────────────────────
-
-    def stats(self) -> dict:
+    def all_tag_names(self) -> frozenset[str]:
         """
-        Return memory footprint and count metrics.
-        memory_mb is an approximation via sys.getsizeof.
+        Cached frozenset of all tag names (original case).
+        Used by HallucinationGuard for O(1) membership.
         """
-        tag_mem = _deep_sizeof(self._tags)
-        rtn_mem = _deep_sizeof(self._routines)
-        aoi_mem = _deep_sizeof(self._aois)
-        io_mem = _deep_sizeof(self._ios)
-        total_mb = (tag_mem + rtn_mem + aoi_mem + io_mem) / (1024 ** 2)
+        if self._tag_name_cache is None:
+            with self._lock:
+                self._tag_name_cache = frozenset(r.name for r in self._tags.values())
+        return self._tag_name_cache
 
-        result = {
-            "project_id": self.project_id,
-            "tags": len(self._tags),
-            "routines": len(self._routines),
-            "aois": len(self._aois),
-            "ios": len(self._ios),
-            "memory_mb": round(total_mb, 3),
-            "warnings": list(self._warnings),
-        }
+    def all_tag_names_lower(self) -> frozenset[str]:
+        names = self.all_tag_names()
+        return frozenset(n.lower() for n in names)
 
-        if total_mb > 500:
-            result["warnings"].append(
-                f"StructuredIndex memory {total_mb:.1f}MB exceeds 500MB. Consider reducing project scope."
+    # ── Stats & memory ────────────────────────────────────────────────────────
+
+    def stats(self) -> StructuredIndexStats:
+        with self._lock:
+            tag_count = len(self._tags)
+            rtn_count = len(self._routines)
+            mb = (
+                _size_mb(self._tags)
+                + _size_mb(self._routines)
+                + _size_mb(self._aois)
+                + _size_mb(self._io)
             )
-        return result
+            warnings = []
+            if tag_count >= WARN_TAGS:
+                warnings.append(
+                    f"Tag count ({tag_count:,}) exceeds recommended threshold "
+                    f"({WARN_TAGS:,}). Consider splitting into sub-projects."
+                )
+            return StructuredIndexStats(
+                tags=tag_count,
+                routines=rtn_count,
+                aois=len(self._aois),
+                io_rows=len(self._io),
+                memory_footprint_mb=round(mb, 2),
+                at_capacity=(tag_count >= MAX_TAGS or rtn_count >= MAX_ROUTINES),
+                warnings=warnings,
+            )
+
+    # ── Clear ─────────────────────────────────────────────────────────────────
 
     def clear(self) -> None:
-        """Purge all data (called on project reset/reindex)."""
-        self._tags.clear()
-        self._routines.clear()
-        self._aois.clear()
-        self._ios.clear()
-        self._warnings.clear()
+        with self._lock:
+            self._tags.clear()
+            self._routines.clear()
+            self._aois.clear()
+            self._io.clear()
+            self._tag_name_cache = None
+        logger.info("[%s] StructuredIndex cleared.", self.project_id)
 
 
-# ── Global registry ───────────────────────────────────────────────────────────
-# One StructuredIndex per project_id, shared across request handlers.
-_registry: Dict[str, StructuredIndex] = {}
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _size_mb(obj: object) -> float:
+    """Rough memory estimate in MB using sys.getsizeof (shallow)."""
+    try:
+        return sys.getsizeof(obj) / (1024 * 1024)
+    except Exception:
+        return 0.0
+
+
+# ── Registry ──────────────────────────────────────────────────────────────────
+
+_registry: dict[str, StructuredIndex] = {}
+_registry_lock = threading.Lock()
 
 
 def get_structured_index(project_id: str) -> StructuredIndex:
-    if project_id not in _registry:
-        _registry[project_id] = StructuredIndex(project_id)
-    return _registry[project_id]
+    """Return (or create) the StructuredIndex for a project."""
+    with _registry_lock:
+        if project_id not in _registry:
+            _registry[project_id] = StructuredIndex(project_id)
+        return _registry[project_id]
 
 
-def delete_structured_index(project_id: str) -> None:
-    if project_id in _registry:
-        _registry[project_id].clear()
-        del _registry[project_id]
+def clear_structured_index(project_id: str) -> None:
+    with _registry_lock:
+        if project_id in _registry:
+            _registry[project_id].clear()

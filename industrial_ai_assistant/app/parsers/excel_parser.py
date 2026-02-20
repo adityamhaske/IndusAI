@@ -1,107 +1,130 @@
 """
-Excel Parser — IO sheets and commissioning worksheets.
+Excel parser for IO sheets and commissioning spreadsheets.
 
-Reads all sheets from an xlsx/xls file.
-Normalizes column aliases to canonical names.
-Returns a list of IORecord objects.
+Uses openpyxl in read-only mode for memory efficiency.
+Normalizes 20+ column aliases to canonical names.
 """
-import logging
-from pathlib import Path
-from typing import List
+from __future__ import annotations
 
-import openpyxl
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 from app.models.project_models import IORecord
 
 logger = logging.getLogger(__name__)
 
-# Column alias → canonical name
-_COL_MAP = {
-    # slot
-    "slot": "slot", "slot#": "slot", "slot number": "slot",
+# Column alias normalisation map (lowercase → canonical)
+_COL_MAP: dict[str, str] = {
+    # slot / point
+    "slot": "slot", "point": "slot", "io point": "slot", "io_point": "slot",
+    "channel": "slot", "address": "slot",
     # rack
-    "rack": "rack", "rack#": "rack", "rack number": "rack",
-    # module
-    "module": "module", "module type": "module", "card type": "module",
-    "mod": "module", "device": "module",
+    "rack": "rack", "chassis": "rack", "frame": "rack",
+    # module / card
+    "module": "module", "card": "module", "card type": "module",
+    "device type": "module", "module type": "module", "i/o module": "module",
     # description
-    "description": "description", "desc": "description",
-    "tag description": "description", "comment": "description",
-    # channel
-    "channel": "channel", "ch": "channel", "ch#": "channel",
-    # tag
+    "description": "description", "tag description": "description",
+    "signal description": "description", "label": "description",
+    "comment": "description", "function": "description",
+    # tag name
     "tag": "tag_name", "tag name": "tag_name", "plc tag": "tag_name",
-    "address": "tag_name", "tag address": "tag_name",
+    "address tag": "tag_name", "symbol": "tag_name",
 }
 
+# Rows whose first cell looks like a section header are skipped
+_SKIP_KEYWORDS = {"no.", "no", "#", "item", "ref", "s/n", "sl no"}
 
-def parse(path: str | Path) -> List[IORecord]:
-    """
-    Parse IO/commissioning Excel file.
 
-    Returns:
-        List of IORecord objects (one per data row).
-    Raises:
-        ValueError if file cannot be opened.
+@dataclass
+class ExcelParseResult:
+    io_rows: list[IORecord] = field(default_factory=list)
+    source_file: str = ""
+    sheets_parsed: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+
+def parse(file_path: str | Path) -> ExcelParseResult:
     """
-    source = str(path)
+    Parse all sheets in an Excel file, return IO rows.
+    Never raises — returns warnings in result.
+    """
     try:
-        wb = openpyxl.load_workbook(source, read_only=True, data_only=True)
+        import openpyxl
+    except ImportError:
+        return ExcelParseResult(
+            source_file=str(file_path),
+            warnings=["openpyxl not installed — Excel parsing skipped."],
+        )
+
+    path = Path(file_path)
+    result = ExcelParseResult(source_file=str(path))
+
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     except Exception as exc:
-        raise ValueError(f"Cannot open Excel file {source}: {exc}") from exc
+        result.warnings.append(f"Cannot open {path.name}: {exc}")
+        return result
 
-    records: List[IORecord] = []
     for sheet_name in wb.sheetnames:
-        try:
-            sheet = wb[sheet_name]
-            rows = list(sheet.iter_rows(values_only=True))
-            if len(rows) < 2:
-                continue  # header only
-
-            headers = _normalize_headers(rows[0])
-            if not headers:
-                continue
-
-            for row in rows[1:]:
-                rec = _row_to_record(headers, row, source)
-                if rec:
-                    records.append(rec)
-        except Exception as exc:
-            logger.warning("Excel sheet '%s' in %s: %s", sheet_name, source, exc)
-
-    logger.debug("Excel %s → %d IO records", Path(source).name, len(records))
-    return records
-
-
-def _normalize_headers(header_row) -> dict:
-    """Map column index → canonical name using alias table."""
-    mapping = {}
-    for i, cell in enumerate(header_row):
-        if cell is None:
+        ws = wb[sheet_name]
+        rows = list(ws.iter_rows(values_only=True))
+        if len(rows) < 2:
             continue
-        key = str(cell).strip().lower()
-        canonical = _COL_MAP.get(key)
-        if canonical:
-            mapping[i] = canonical
-    return mapping
+
+        # Find header row — first row with recognisable column names
+        header_idx, col_map = _find_header(rows)
+        if not col_map:
+            result.warnings.append(
+                f"{path.name} sheet='{sheet_name}': No recognisable IO columns found."
+            )
+            continue
+
+        result.sheets_parsed += 1
+        for row in rows[header_idx + 1:]:
+            io = _parse_row(row, col_map, str(path))
+            if io:
+                result.io_rows.append(io)
+
+    wb.close()
+    logger.debug("Excel parsed: %s → %d IO rows", path.name, len(result.io_rows))
+    return result
 
 
-def _row_to_record(headers: dict, row: tuple, source: str) -> IORecord | None:
-    """Convert a data row to an IORecord. Returns None if all fields empty."""
-    fields = {}
-    for idx, canonical in headers.items():
+def _find_header(rows: list[tuple]) -> tuple[int, dict[int, str]]:
+    """Scan first 10 rows for the header row. Returns (row_index, {col_idx→canonical})."""
+    for i, row in enumerate(rows[:10]):
+        col_map: dict[int, str] = {}
+        for j, cell in enumerate(row):
+            if cell is None:
+                continue
+            key = str(cell).strip().lower().rstrip(":").rstrip("*")
+            canonical = _COL_MAP.get(key)
+            if canonical:
+                col_map[j] = canonical
+        if len(col_map) >= 2:
+            return i, col_map
+    return 0, {}
+
+
+def _parse_row(row: tuple, col_map: dict[int, str], source: str) -> IORecord | None:
+    data: dict[str, Any] = {}
+    for idx, canonical in col_map.items():
         if idx < len(row) and row[idx] is not None:
-            fields[canonical] = str(row[idx]).strip()
+            data[canonical] = str(row[idx]).strip()
 
-    if not any(fields.values()):
+    # Skip empty rows and section headers
+    slot = data.get("slot", "").strip()
+    if not slot or slot.lower() in _SKIP_KEYWORDS:
         return None
 
     return IORecord(
-        slot=fields.get("slot", ""),
-        rack=fields.get("rack", ""),
-        module=fields.get("module", ""),
-        description=fields.get("description", ""),
-        channel=fields.get("channel", ""),
-        tag_name=fields.get("tag_name", ""),
+        slot=slot,
+        rack=data.get("rack", ""),
+        module=data.get("module", ""),
+        description=data.get("description", ""),
+        tag_name=data.get("tag_name", ""),
         source_file=source,
     )

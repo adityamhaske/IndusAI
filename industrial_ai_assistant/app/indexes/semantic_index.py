@@ -1,267 +1,283 @@
 """
-SemanticIndex — Hybrid BM25 + Qdrant vector retrieval, project-scoped.
+SemanticIndex — Qdrant-backed vector store with hybrid search.
 
-Design:
-  - Every upsert includes metadata.project_id
-  - Every search filters by metadata.project_id — no cross-project leakage
-  - BM25 keyword search via scikit-learn TfidfVectorizer (in-process)
-  - Qdrant vector search with project_id payload filter
-  - Results merged + deduplicated by chunk_id, re-ranked by combined score
+Every upsert and search MANDATES project_id in payload/filter.
+No cross-project contamination is possible by design.
+
+Hybrid search = BM25 (in-process) + Qdrant vector, merged via RRF.
 """
+from __future__ import annotations
+
+import hashlib
 import logging
-import uuid
-from typing import Dict, List, Optional
+import math
+import re
+from collections import defaultdict
+from typing import Optional
 
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-
-from app.models.project_models import SemanticChunk
+from app.models.project_models import ScoredChunk, SemanticChunk
 
 logger = logging.getLogger(__name__)
 
 _QDRANT_COLLECTION = "project_knowledge"
-_VECTOR_SIZE = 384   # all-MiniLM-L6-v2 output dim
+_VECTOR_DIM = 384   # all-MiniLM-L6-v2
 
 
 class SemanticIndex:
     """
-    Hybrid semantic retrieval index (per-application singleton, project-scoped by metadata).
+    Wraps Qdrant for semantic storage and retrieval.
+    BM25 index is maintained in-process over chunk texts per project.
     """
 
-    def __init__(self, qdrant_host: str = "localhost", qdrant_port: int = 6333,
-                 embedder=None):
+    def __init__(self, embedder, qdrant_host: str = "localhost", qdrant_port: int = 6333):
+        self._embedder = embedder
         self._host = qdrant_host
         self._port = qdrant_port
-        self._embedder = embedder
-        self._qdrant = None
-        # BM25 store: project_id → {chunk_id: content}
-        self._bm25_store: Dict[str, Dict[str, str]] = {}
+        self._client = None
 
-    def _get_qdrant(self):
-        if self._qdrant is None:
-            try:
-                from qdrant_client import QdrantClient
-                self._qdrant = QdrantClient(host=self._host, port=self._port, timeout=5)
-                self._ensure_collection()
-            except Exception as exc:
-                logger.warning("Qdrant unavailable — falling back to keyword-only: %s", exc)
-                self._qdrant = None
-        return self._qdrant
+        # BM25 inverted index per project: {project_id → {term → {chunk_id → tf}}}
+        self._bm25_index: dict[str, dict[str, dict[str, float]]] = defaultdict(
+            lambda: defaultdict(dict)
+        )
+        # Chunk text store for BM25: {project_id → {chunk_id → chunk}}
+        self._chunk_store: dict[str, dict[str, SemanticChunk]] = defaultdict(dict)
+        # Document frequency per project: {project_id → {term → doc_count}}
+        self._df: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
 
-    def _ensure_collection(self) -> None:
-        try:
+    def _get_client(self):
+        if self._client is None:
+            from qdrant_client import QdrantClient
             from qdrant_client.models import Distance, VectorParams
-            client = self._qdrant
-            existing = [c.name for c in client.get_collections().collections]
+            self._client = QdrantClient(host=self._host, port=self._port)
+            # Ensure collection exists
+            existing = [c.name for c in self._client.get_collections().collections]
             if _QDRANT_COLLECTION not in existing:
-                client.create_collection(
+                self._client.create_collection(
                     collection_name=_QDRANT_COLLECTION,
-                    vectors_config=VectorParams(size=_VECTOR_SIZE, distance=Distance.COSINE),
+                    vectors_config=VectorParams(size=_VECTOR_DIM, distance=Distance.COSINE),
                 )
-                logger.info("Created Qdrant collection '%s'", _QDRANT_COLLECTION)
-        except Exception as exc:
-            logger.warning("Could not ensure collection: %s", exc)
+                logger.info("Created Qdrant collection: %s", _QDRANT_COLLECTION)
+        return self._client
 
-    def upsert_chunks(self, project_id: str, chunks: List[SemanticChunk]) -> int:
+    # ── Upsert ─────────────────────────────────────────────────────────────────
+
+    def upsert_chunks(self, chunks: list[SemanticChunk], project_id: str) -> int:
         """
-        Embed and upsert chunks into Qdrant + BM25 store.
-        EVERY chunk must carry project_id in metadata.
-
-        Returns number of chunks successfully indexed.
+        Embed and upsert chunks into Qdrant.
+        project_id is mandatory — enforced by type signature AND payload.
+        Returns number of chunks upserted.
         """
         if not chunks:
             return 0
 
-        # Update BM25 store
-        if project_id not in self._bm25_store:
-            self._bm25_store[project_id] = {}
-        for c in chunks:
-            self._bm25_store[project_id][c.chunk_id] = c.content
+        from qdrant_client.models import PointStruct
 
-        # Qdrant vector upsert
-        client = self._get_qdrant()
-        if client is None:
-            logger.warning("Qdrant not available. Chunks stored in BM25 only.")
-            return len(chunks)
+        client = self._get_client()
+        points = []
 
-        try:
-            from qdrant_client.models import PointStruct
-            texts = [c.content for c in chunks]
-            embeddings = self._embed_batch(texts)
-            if embeddings is None:
-                return len(chunks)
+        for chunk in chunks:
+            embedding = self._embedder.embed_text(chunk.content)
+            point_id = _chunk_uuid(chunk.chunk_id)
+            payload = {
+                "project_id":    project_id,   # MANDATORY — never omit
+                "source_file":   chunk.source_file,
+                "section_title": chunk.section_title,
+                "file_type":     chunk.file_type,
+                "page":          chunk.page,
+                "content":       chunk.content,
+                "chunk_id":      chunk.chunk_id,
+            }
+            points.append(PointStruct(id=point_id, vector=embedding, payload=payload))
 
-            points = []
-            for chunk, vector in zip(chunks, embeddings):
-                points.append(PointStruct(
-                    id=str(uuid.uuid5(uuid.NAMESPACE_DNS, chunk.chunk_id)),
-                    vector=vector.tolist(),
-                    payload={
-                        "project_id": project_id,        # MANDATORY — enables filtering
-                        "chunk_id": chunk.chunk_id,
-                        "content": chunk.content,
-                        "source_file": chunk.source_file,
-                        "section_title": chunk.section_title,
-                        "file_type": chunk.file_type,
-                        "page": chunk.page,
-                    },
-                ))
+            # BM25 index update
+            self._bm25_add(project_id, chunk.chunk_id, chunk.content, chunk)
 
-            client.upsert(collection_name=_QDRANT_COLLECTION, points=points)
-            return len(points)
-        except Exception as exc:
-            logger.error("Qdrant upsert failed: %s", exc, exc_info=True)
-            return len(chunks)
+        client.upsert(collection_name=_QDRANT_COLLECTION, points=points)
+        logger.debug("Upserted %d chunks for project=%s", len(points), project_id)
+        return len(points)
 
-    def search(
+    # ── Vector search ──────────────────────────────────────────────────────────
+
+    def vector_search(
         self,
         query: str,
         project_id: str,
         top_k: int = 5,
-        file_type_filter: Optional[str] = None,
-    ) -> List[dict]:
-        """
-        Hybrid search: BM25 keyword + Qdrant vector, filtered by project_id.
-        Returns up to top_k results with similarity_score.
-        Cross-project results are NEVER returned.
-        """
-        bm25_hits = self._bm25_search(query, project_id, top_k * 2)
-        vector_hits = self._vector_search(query, project_id, top_k * 2, file_type_filter)
+        file_type: Optional[str] = None,
+    ) -> list[ScoredChunk]:
+        """Pure cosine vector search, filtered by project_id (mandatory)."""
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-        # Merge + deduplicate by chunk_id
-        seen: Dict[str, dict] = {}
-        for hit in vector_hits:
-            seen[hit["chunk_id"]] = hit
-        for hit in bm25_hits:
-            cid = hit["chunk_id"]
-            if cid in seen:
-                # Boost combined score
-                seen[cid]["score"] = min(1.0, seen[cid]["score"] + hit["score"] * 0.3)
-            else:
-                seen[cid] = hit
+        client = self._get_client()
+        q_emb = self._embedder.embed_text(query)
 
-        ranked = sorted(seen.values(), key=lambda x: x["score"], reverse=True)
-        return ranked[:top_k]
+        must = [FieldCondition(key="project_id", match=MatchValue(value=project_id))]
+        if file_type:
+            must.append(FieldCondition(key="file_type", match=MatchValue(value=file_type)))
+
+        hits = client.search(
+            collection_name=_QDRANT_COLLECTION,
+            query_vector=q_emb,
+            query_filter=Filter(must=must),
+            limit=top_k,
+            with_payload=True,
+        )
+        return [_hit_to_scored(h, "vector") for h in hits]
+
+    # ── BM25 keyword search ────────────────────────────────────────────────────
+
+    def bm25_search(
+        self,
+        query: str,
+        project_id: str,
+        top_k: int = 5,
+    ) -> list[ScoredChunk]:
+        """
+        In-process BM25 over chunks stored for this project.
+        Formula: standard BM25 with k1=1.5, b=0.75.
+        """
+        terms = _tokenise(query)
+        if not terms or project_id not in self._chunk_store:
+            return []
+
+        store = self._chunk_store[project_id]
+        bm25 = self._bm25_index[project_id]
+        df = self._df[project_id]
+        N = len(store)
+        if N == 0:
+            return []
+
+        k1, b = 1.5, 0.75
+        avg_len = sum(len(_tokenise(c.content)) for c in store.values()) / N
+
+        scores: dict[str, float] = defaultdict(float)
+        for term in terms:
+            if term not in bm25:
+                continue
+            idf = math.log((N - df.get(term, 0) + 0.5) / (df.get(term, 0) + 0.5) + 1)
+            for chunk_id, tf in bm25[term].items():
+                chunk = store.get(chunk_id)
+                if chunk is None:
+                    continue
+                dl = len(_tokenise(chunk.content))
+                norm_tf = tf * (k1 + 1) / (tf + k1 * (1 - b + b * dl / avg_len))
+                scores[chunk_id] += idf * norm_tf
+
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        results = []
+        for cid, score in ranked:
+            chunk = store[cid]
+            results.append(ScoredChunk(chunk=chunk, score=score, retrieval_method="bm25"))
+        return results
+
+    # ── Hybrid search (RRF) ────────────────────────────────────────────────────
+
+    def hybrid_search(
+        self,
+        query: str,
+        project_id: str,
+        top_k: int = 5,
+        file_type: Optional[str] = None,
+    ) -> list[ScoredChunk]:
+        """
+        Reciprocal Rank Fusion of BM25 + vector results.
+        RRF formula: score = Σ 1/(k + rank)  with k=60.
+        """
+        k_rrf = 60
+        vector_hits = self.vector_search(query, project_id, top_k=top_k * 2, file_type=file_type)
+        bm25_hits   = self.bm25_search(query, project_id, top_k=top_k * 2)
+
+        rrf: dict[str, float] = {}
+        seen_chunks: dict[str, ScoredChunk] = {}
+
+        for rank, item in enumerate(vector_hits, 1):
+            cid = item.chunk.chunk_id
+            rrf[cid] = rrf.get(cid, 0.0) + 1 / (k_rrf + rank)
+            seen_chunks[cid] = item
+
+        for rank, item in enumerate(bm25_hits, 1):
+            cid = item.chunk.chunk_id
+            rrf[cid] = rrf.get(cid, 0.0) + 1 / (k_rrf + rank)
+            if cid not in seen_chunks:
+                seen_chunks[cid] = item
+
+        ranked = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        return [
+            ScoredChunk(chunk=seen_chunks[cid].chunk, score=score, retrieval_method="hybrid")
+            for cid, score in ranked
+            if cid in seen_chunks
+        ]
+
+    # ── Utility ───────────────────────────────────────────────────────────────
+
+    def collection_size(self, project_id: str) -> int:
+        """Number of chunks indexed for this project."""
+        return len(self._chunk_store.get(project_id, {}))
 
     def delete_project(self, project_id: str) -> None:
-        """Remove all vectors and BM25 entries for a project."""
-        self._bm25_store.pop(project_id, None)
-        client = self._get_qdrant()
-        if client is None:
-            return
-        try:
-            from qdrant_client.models import Filter, FieldCondition, MatchValue
-            client.delete(
-                collection_name=_QDRANT_COLLECTION,
-                points_selector=Filter(
-                    must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]
-                ),
-            )
-        except Exception as exc:
-            logger.error("Qdrant delete for project '%s' failed: %s", project_id, exc)
+        """Remove all Qdrant points and BM25 data for this project."""
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        client = self._get_client()
+        client.delete(
+            collection_name=_QDRANT_COLLECTION,
+            points_selector=Filter(
+                must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]
+            ),
+        )
+        self._bm25_index.pop(project_id, None)
+        self._chunk_store.pop(project_id, None)
+        self._df.pop(project_id, None)
+        logger.info("Deleted SemanticIndex data for project=%s", project_id)
 
-    def chunk_count(self, project_id: str) -> int:
-        """Count chunks stored for a project (BM25 store as proxy)."""
-        return len(self._bm25_store.get(project_id, {}))
+    # ── BM25 helpers ──────────────────────────────────────────────────────────
 
-    # ── Internal search methods ───────────────────────────────────────────────
-
-    def _bm25_search(self, query: str, project_id: str, top_k: int) -> List[dict]:
-        """TF-IDF keyword search scoped to project_id."""
-        store = self._bm25_store.get(project_id, {})
-        if not store:
-            return []
-        try:
-            ids = list(store.keys())
-            docs = [store[i] for i in ids]
-            corpus = docs + [query]
-            vec = TfidfVectorizer(stop_words="english", max_features=10_000)
-            tfidf = vec.fit_transform(corpus)
-            scores = cosine_similarity(tfidf[-1:], tfidf[:-1]).flatten()
-            top_idx = np.argsort(scores)[::-1][:top_k]
-            return [
-                {
-                    "chunk_id": ids[i],
-                    "content": docs[i],
-                    "score": float(scores[i]),
-                    "source": "bm25",
-                    "section_title": "",
-                    "source_file": "",
-                    "file_type": "",
-                }
-                for i in top_idx if scores[i] > 0.01
-            ]
-        except Exception as exc:
-            logger.warning("BM25 search failed: %s", exc)
-            return []
-
-    def _vector_search(self, query: str, project_id: str, top_k: int,
-                       file_type_filter: Optional[str]) -> List[dict]:
-        """Qdrant cosine vector search filtered by project_id."""
-        client = self._get_qdrant()
-        if client is None:
-            return []
-        embedding = self._embed_text(query)
-        if embedding is None:
-            return []
-        try:
-            from qdrant_client.models import Filter, FieldCondition, MatchValue, FieldCondition
-            must = [FieldCondition(key="project_id", match=MatchValue(value=project_id))]
-            if file_type_filter:
-                must.append(FieldCondition(key="file_type", match=MatchValue(value=file_type_filter)))
-
-            results = client.search(
-                collection_name=_QDRANT_COLLECTION,
-                query_vector=embedding.tolist(),
-                query_filter=Filter(must=must),
-                limit=top_k,
-                with_payload=True,
-            )
-            return [
-                {
-                    "chunk_id": r.payload.get("chunk_id", ""),
-                    "content": r.payload.get("content", ""),
-                    "score": r.score,
-                    "source": "vector",
-                    "section_title": r.payload.get("section_title", ""),
-                    "source_file": r.payload.get("source_file", ""),
-                    "file_type": r.payload.get("file_type", ""),
-                }
-                for r in results
-            ]
-        except Exception as exc:
-            logger.error("Qdrant search error: %s", exc, exc_info=True)
-            return []
-
-    def _embed_text(self, text: str):
-        if self._embedder is None:
-            return None
-        try:
-            vec = self._embedder.embed_text(text)
-            return np.array(vec, dtype=np.float32)
-        except Exception as exc:
-            logger.warning("Embedding failed: %s", exc)
-            return None
-
-    def _embed_batch(self, texts: List[str]):
-        if self._embedder is None:
-            return None
-        try:
-            vecs = [self._embedder.embed_text(t) for t in texts]
-            return np.array(vecs, dtype=np.float32)
-        except Exception as exc:
-            logger.warning("Batch embedding failed: %s", exc)
-            return None
+    def _bm25_add(self, project_id: str, chunk_id: str, text: str, chunk: SemanticChunk) -> None:
+        tokens = _tokenise(text)
+        tf_map: dict[str, float] = {}
+        for t in tokens:
+            tf_map[t] = tf_map.get(t, 0) + 1
+        for term, tf in tf_map.items():
+            self._bm25_index[project_id][term][chunk_id] = tf
+            self._df[project_id][term] = self._df[project_id].get(term, 0) + 1
+        self._chunk_store[project_id][chunk_id] = chunk
 
 
-# ── Global singleton ──────────────────────────────────────────────────────────
-_instance: Optional[SemanticIndex] = None
+# ── Module helpers ─────────────────────────────────────────────────────────────
+
+def _tokenise(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9_]+", text.lower())
 
 
-def get_semantic_index(qdrant_host: str = "localhost", qdrant_port: int = 6333,
-                       embedder=None) -> SemanticIndex:
+def _chunk_uuid(chunk_id: str) -> int:
+    """Convert chunk_id string to a positive int usable as Qdrant point ID."""
+    h = hashlib.sha1(chunk_id.encode()).hexdigest()[:16]
+    return int(h, 16) & 0x7FFFFFFFFFFFFFFF   # keep positive
+
+
+def _hit_to_scored(hit, method: str) -> ScoredChunk:
+    p = hit.payload or {}
+    chunk = SemanticChunk(
+        chunk_id=p.get("chunk_id", str(hit.id)),
+        content=p.get("content", ""),
+        source_file=p.get("source_file", ""),
+        section_title=p.get("section_title", ""),
+        file_type=p.get("file_type", ""),
+        page=p.get("page", 0),
+        project_id=p.get("project_id", ""),
+    )
+    return ScoredChunk(chunk=chunk, score=hit.score, retrieval_method=method)
+
+
+# ── Singleton registry ─────────────────────────────────────────────────────────
+
+_instance: SemanticIndex | None = None
+
+
+def get_semantic_index(embedder=None, host="localhost", port=6333) -> SemanticIndex:
     global _instance
     if _instance is None:
-        _instance = SemanticIndex(qdrant_host, qdrant_port, embedder)
+        if embedder is None:
+            from app.embeddings.mock_embedder import MockEmbedder
+            embedder = MockEmbedder()
+        _instance = SemanticIndex(embedder=embedder, qdrant_host=host, qdrant_port=port)
     return _instance

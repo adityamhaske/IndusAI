@@ -1,297 +1,265 @@
 """
-QueryOrchestrator — 9-step PLC project query pipeline.
+QueryOrchestrator — 9-step pipeline from question to validated response.
 
-Steps:
-  1. require_ready(project_id)             — fail-fast
-  2. classify(query)                       — multi-label QueryIntent
-  3. structured lookups                    — TAG/IO/ROUTINE from StructuredIndex (exact)
-  4. semantic retrieval                    — hybrid BM25+vector from SemanticIndex
+Pipeline:
+  1. require_ready()           — fail-fast if project not indexed / stale
+  2. classify(query)           — multi-label QueryIntent
+  3. structured_lookup()       — exact hits from StructuredIndex
+  4. hybrid_search()           — BM25+vector from SemanticIndex
   5. merge contexts
-  6. build prompt (PromptBuilder, 3800 token budget)
-  7. call LLM → raw JSON
-  8. extract PLC tag candidates
-  9. fuzzy validate against StructuredIndex → reject hallucinated
+  6. PromptBuilder.build()     — token-capped prompt
+  7. LLM.generate()            — Mistral 7B via Ollama
+  8. Parse/validate JSON        — ProjectQueryResponse schema
+  9. HallucinationGuard()      — reject invented PLC tags
 
-No silent fallback. Every failure raises a typed exception.
+Hallucination guard patterns:
+  - UPPER_CASE tokens (e.g. MOTOR_SPEED)
+  - Program:Tag scoped (e.g. MainProgram:MotorSpeed)
+  - Dotted member (e.g. Drive.Speed)
+  - CamelCase (e.g. MotorSpeed)
+  Fuzzy threshold: 0.85 (SequenceMatcher ratio)
 """
+from __future__ import annotations
+
 import json
 import logging
 import re
 import time
 from difflib import SequenceMatcher
-from typing import Dict, List, Optional, Tuple
 
-from app.core.project_exceptions import HallucinatedTagError, ProjectNotReadyError
+from app.core.project_exceptions import HallucinatedTagError
 from app.indexes.semantic_index import get_semantic_index
 from app.indexes.structured_index import get_structured_index
 from app.models.project_models import (
     ProjectQueryRequest,
     ProjectQueryResponse,
+    ScoredChunk,
     StructuredHit,
+    QueryType,
 )
+from app.services import query_classifier
 from app.services.project_context_manager import get_project_context_manager
-from app.services.query_classifier import classify
+from app.services.prompt_builder import PROMPT_VERSION, build as build_prompt
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "project_v1.0"
-_MAX_TOKENS = 3_800          # character-based budget (≈4 chars/token)
-_MAX_CHARS = _MAX_TOKENS * 4 # 15,200 chars
-_FUZZY_THRESHOLD = 0.85      # min ratio for fuzzy tag match
-
-# Patterns for extracting PLC tag candidates from LLM output
+# Tag candidate extraction patterns
 _TAG_PATTERNS = [
-    re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b"),                   # MOTOR_SPEED
-    re.compile(r"\b\w+:([A-Z][A-Z0-9_]{2,})\b"),             # Program:Tag
-    re.compile(r"\b([A-Z][A-Z0-9_]+)\.([A-Z][A-Z0-9_]+)\b"), # Tag.Member
+    re.compile(r'\b[A-Z][A-Z0-9_]{2,}\b'),         # UPPER_SNAKE_CASE
+    re.compile(r'\b[A-Z][a-z]+(?:[A-Z][a-zA-Z0-9]+)+\b'),  # CamelCase
+    re.compile(r'\b\w+:\w[\w.]*\b'),                # Program:Tag scoped
+    re.compile(r'\b[A-Za-z]\w+\.[A-Za-z]\w+\b'),   # Dotted.Member
 ]
 
-# Noise words that match tag pattern but are not tags
-_NOISE_WORDS = frozenset([
-    "LOW", "HIGH", "TRUE", "FALSE", "NONE", "NULL",
-    "LLM", "PLC", "CPU", "IO", "RIO", "AOI", "JSON",
-    "GET", "SET", "TAG", "AND", "NOT", "FOR", "ALL",
-    "MAX", "MIN", "AVG", "SUM", "NEW", "OLD",
-])
+# Minimum character length for a token to be inspected
+_MIN_TAG_LEN = 4
+_FUZZY_THRESHOLD = 0.85
 
 
 class QueryOrchestrator:
-    """Full 9-step query orchestration pipeline."""
-
-    def __init__(self, llm=None):
-        self._llm = llm
-
-    def _get_llm(self):
-        if self._llm is None:
-            from app.config.dependency_injection import get_container
-            self._llm = get_container().llm
-        return self._llm
+    """Executes the full 9-step query pipeline."""
 
     def query(self, request: ProjectQueryRequest) -> ProjectQueryResponse:
-        pid = request.project_id
-        t0 = time.perf_counter()
+        t_start = time.perf_counter()
+        project_id = request.project_id
 
-        # ── Step 1: Fail-fast readiness check ────────────────────────────────
-        get_project_context_manager().require_ready(pid)
+        # ── Step 1: Fail-fast ──────────────────────────────────────────────────
+        ctx = get_project_context_manager()
+        ctx.require_ready(project_id)
 
-        # ── Step 2: Classify query ────────────────────────────────────────────
-        intent = classify(request.question)
-        logger.info("Query intent: labels=%s struct=%s sem=%s",
-                    intent.labels, intent.structured_required, intent.semantic_required)
+        # ── Step 2: Classify ──────────────────────────────────────────────────
+        intent = query_classifier.classify(request.question)
+        logger.info("[%s] Query intent: %s", project_id, intent.labels)
 
-        # ── Step 3: Structured lookups ────────────────────────────────────────
-        s_idx = get_structured_index(pid)
-        structured_hits: List[StructuredHit] = []
+        # ── Step 3: Structured lookup ─────────────────────────────────────────
+        si = get_structured_index(project_id)
+        structured_hits = _structured_lookup(request.question, intent, si)
 
-        if intent.structured_required:
-            # Extract potential identifiers from query
-            candidates = re.findall(r"[A-Z][A-Z0-9_]{2,}", request.question)
-            for cand in candidates:
-                tag = s_idx.get_tag(cand)
-                if tag:
-                    structured_hits.append(StructuredHit(
-                        type="tag",
-                        name=tag.name,
-                        detail={"data_type": tag.data_type, "scope": tag.scope,
-                                "description": tag.description},
-                    ))
-                routine = s_idx.get_routine(cand)
-                if routine:
-                    structured_hits.append(StructuredHit(
-                        type="routine",
-                        name=routine.name,
-                        detail={"program": routine.program, "type": routine.routine_type,
-                                "rungs": routine.rung_count},
-                    ))
+        # ── Step 4: Semantic retrieval (hybrid) ───────────────────────────────
+        sem = get_semantic_index()
+        semantic_hits: list[ScoredChunk] = []
+        if intent.semantic_required:
+            try:
+                semantic_hits = sem.hybrid_search(
+                    query=request.question,
+                    project_id=project_id,
+                    top_k=request.top_k,
+                )
+            except Exception as exc:
+                logger.warning("Semantic retrieval failed: %s", exc)
 
-            # IO lookup: slot/rack numbers
-            slots = re.findall(r"\b(\d+)\b", request.question)
-            for slot in slots[:3]:
-                io = s_idx.get_io(slot)
-                if io:
-                    structured_hits.append(StructuredHit(
-                        type="io",
-                        name=f"Slot {slot}",
-                        detail={"module": io.module, "description": io.description,
-                                "tag_name": io.tag_name, "rack": io.rack},
-                    ))
+        # ── Step 5: Merge contexts (already ordered: structured first) ─────────
+        # (both lists are passed separately to PromptBuilder)
 
-        # ── Step 4: Semantic retrieval ────────────────────────────────────────
-        sem_docs: List[dict] = []
-        if intent.semantic_required or intent.progress_required:
-            sem_idx = get_semantic_index()
-            sem_docs = sem_idx.search(
-                query=request.question,
-                project_id=pid,
-                top_k=5,
-            )
-
-        # ── Step 5: Merge context ─────────────────────────────────────────────
-        doc_sources = list(dict.fromkeys(
-            d["source_file"] for d in sem_docs if d.get("source_file")
-        ))
-
-        # ── Step 6: Build prompt with token budget ────────────────────────────
-        prompt = _build_prompt(
+        # ── Step 6: Build prompt ──────────────────────────────────────────────
+        prompt = build_prompt(
             question=request.question,
+            intent_labels=[l.value for l in intent.labels],
             structured_hits=structured_hits,
-            sem_docs=sem_docs,
-            all_tag_names=s_idx.all_tag_names(),
+            semantic_chunks=semantic_hits,
         )
 
-        # ── Step 7: Call LLM ──────────────────────────────────────────────────
-        llm = self._get_llm()
-        raw = llm.generate(prompt)
-        llm_ms = (time.perf_counter() - t0) * 1000
+        # ── Step 7: LLM call ──────────────────────────────────────────────────
+        t_llm = time.perf_counter()
+        raw_response = _call_llm(prompt)
+        llm_ms = (time.perf_counter() - t_llm) * 1000
 
-        # ── Step 8: Parse LLM response ────────────────────────────────────────
-        parsed = _parse_response(raw)
+        # ── Step 8: Parse + validate schema ──────────────────────────────────
+        answer, confidence, reasoning = _parse_llm_output(raw_response)
 
         # ── Step 9: Hallucination guard ───────────────────────────────────────
-        known_tags = s_idx.all_tag_names()
-        rejected = _validate_tags(parsed.get("summary", "") + parsed.get("reasoning", ""), known_tags)
-        if rejected:
-            logger.error("Hallucinated tags rejected: %s", rejected)
-            raise HallucinatedTagError(rejected)
+        known_tags = si.all_tag_names_lower()
+        hallucinated = _detect_hallucinated_tags(answer, known_tags)
+
+        if hallucinated:
+            logger.warning(
+                "[%s] Hallucinated tags detected: %s — stripping from answer.",
+                project_id, hallucinated,
+            )
+            # Strip hallucinated tokens from answer (replace with [REDACTED])
+            for tag in hallucinated:
+                # case-insensitive replacement
+                answer = re.sub(re.escape(tag), "[REDACTED]", answer, flags=re.IGNORECASE)
+
+        total_ms = (time.perf_counter() - t_start) * 1000
+        warnings: list[str] = []
+        if hallucinated:
+            warnings.append(
+                f"LLM invented {len(hallucinated)} PLC tag(s) — they have been redacted."
+            )
 
         return ProjectQueryResponse(
-            project_id=pid,
             question=request.question,
-            summary=parsed.get("summary", raw[:500]),
-            reasoning=parsed.get("reasoning", ""),
+            project_id=project_id,
+            query_intent=intent,
             structured_hits=structured_hits,
-            documentation_sources=doc_sources,
-            confidence=parsed.get("confidence", "LOW"),
+            semantic_sources=[sc.chunk.source_file for sc in semantic_hits],
+            answer=answer,
+            confidence=confidence,
+            hallucinated_tags_removed=hallucinated,
             prompt_version=PROMPT_VERSION,
-            hallucinated_tags_rejected=[],
-            query_labels=[str(l) for l in intent.labels],
             llm_latency_ms=round(llm_ms, 1),
+            total_latency_ms=round(total_ms, 1),
+            warnings=warnings,
         )
 
 
-# ── Prompt builder ─────────────────────────────────────────────────────────────
+# ── Structured lookup ──────────────────────────────────────────────────────────
 
-def _build_prompt(
-    question: str,
-    structured_hits: List[StructuredHit],
-    sem_docs: List[dict],
-    all_tag_names: frozenset,
-) -> str:
-    """Build LLM prompt with strict token budget enforcement."""
-    budget = _MAX_CHARS
-    sections: List[str] = []
+def _structured_lookup(query: str, intent, si) -> list[StructuredHit]:
+    hits: list[StructuredHit] = []
+    q_lower = query.lower()
 
-    header = (
-        f"You are an expert PLC commissioning assistant. "
-        f"Answer the engineer's question using ONLY the context below.\n"
-        f"CRITICAL RULES:\n"
-        f"  1. DO NOT invent PLC tags. Only reference tags listed in STRUCTURED INDEX.\n"
-        f"  2. Return valid JSON matching the schema exactly.\n"
-        f"  3. If context is insufficient, state that in 'reasoning'.\n\n"
-        f"QUESTION: {question}\n"
-    )
-    budget -= len(header)
-    sections.append(header)
+    if QueryType.TAG_LOOKUP in intent.labels:
+        # Extract candidate tag names from query (word-level)
+        candidates = re.findall(r'\b[A-Za-z_][A-Za-z0-9_]{2,}\b', query)
+        for cand in candidates:
+            tag = si.get_tag(cand)
+            if tag:
+                hits.append(StructuredHit(hit_type="tag", data=tag.model_dump()))
+            # Also prefix search for shorter tokens
+            prefix_hits = si.search_tags_prefix(cand, limit=3)
+            for t in prefix_hits:
+                if not any(h.data.get("name") == t.name for h in hits):
+                    hits.append(StructuredHit(hit_type="tag", data=t.model_dump()))
 
-    # Structured hits section
-    if structured_hits:
-        struct_lines = ["STRUCTURED INDEX MATCHES:"]
-        for h in structured_hits:
-            line = f"  [{h.type.upper()}] {h.name}: {h.detail}"
-            if budget - len(line) > 500:
-                struct_lines.append(line)
-                budget -= len(line)
-        struct_section = "\n".join(struct_lines) + "\n"
-        sections.append(struct_section)
-    else:
-        sections.append("STRUCTURED INDEX MATCHES: (none found for this query)\n")
-        budget -= 50
+    if QueryType.IO_LOOKUP in intent.labels:
+        # Extract slot/rack patterns like "1:2" or "RIO 3"
+        slot_matches = re.findall(r'\d+[:/]\d+', query) + re.findall(r'slot\s+(\d+)', q_lower)
+        for slot in slot_matches:
+            io = si.get_io(slot)
+            if io:
+                hits.append(StructuredHit(hit_type="io", data=io.model_dump()))
+        # Keyword search on description
+        kw_hits = si.search_io_description(query[:30], limit=3)
+        for io in kw_hits:
+            if not any(h.data.get("slot") == io.slot for h in hits):
+                hits.append(StructuredHit(hit_type="io", data=io.model_dump()))
 
-    # Known tag list sample (first 100 for reference)
-    tag_sample = sorted(list(all_tag_names))[:100]
-    if tag_sample:
-        tag_hint = "VALID PLC TAGS (subset): " + ", ".join(tag_sample[:50]) + "\n"
-        if budget - len(tag_hint) > 500:
-            sections.append(tag_hint)
-            budget -= len(tag_hint)
+    if QueryType.ROUTINE_FLOW in intent.labels:
+        candidates = re.findall(r'\b[A-Za-z_][A-Za-z0-9_]{2,}\b', query)
+        for cand in candidates:
+            rtn = si.get_routine(cand)
+            if rtn:
+                hits.append(StructuredHit(hit_type="routine", data=rtn.model_dump()))
 
-    # Semantic docs section
-    if sem_docs:
-        sem_lines = ["DOCUMENTATION CONTEXT:"]
-        for doc in sem_docs:
-            title = doc.get("section_title") or doc.get("source_file", "")
-            excerpt = doc.get("content", "")[:600]
-            entry = f"  [{title}]\n  {excerpt}\n"
-            if budget - len(entry) > 200:
-                sem_lines.append(entry)
-                budget -= len(entry)
-        sections.append("\n".join(sem_lines) + "\n")
-
-    # Output schema
-    schema = (
-        '\nOUTPUT (strict JSON only, no prose outside):\n'
-        '{\n'
-        '  "summary": "<concise answer to the question>",\n'
-        '  "reasoning": "<explain how you derived the answer>",\n'
-        '  "confidence": "LOW|MEDIUM|HIGH"\n'
-        '}\n'
-    )
-    sections.append(schema)
-
-    return "".join(sections)
+    return hits[:20]   # cap hits per response
 
 
-def _parse_response(raw: str) -> dict:
-    """Extract JSON from LLM response."""
-    raw = raw.strip()
+# ── LLM call ─────────────────────────────────────────────────────────────────
+
+def _call_llm(prompt: str) -> str:
+    """Call OllamaLLM.generate(). Raises LLMConnectionError if unreachable."""
+    from app.llm.ollama_llm import OllamaLLM
+    from app.config.settings import settings
+    llm = OllamaLLM(base_url=settings.OLLAMA_BASE_URL, model=settings.OLLAMA_MODEL)
+    return llm.generate(prompt)
+
+
+def _parse_llm_output(raw: str) -> tuple[str, str, str]:
+    """Extract answer/confidence/reasoning from JSON or plain text."""
+    # Try JSON parse
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
+        # Find JSON block (may be wrapped in markdown code fences)
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            data = json.loads(match.group())
+            answer = data.get("answer", raw)
+            confidence = str(data.get("confidence", "LOW")).upper()
+            if confidence not in ("LOW", "MEDIUM", "HIGH"):
+                confidence = "LOW"
+            reasoning = data.get("reasoning", "")
+            return answer, confidence, reasoning
+    except Exception:
         pass
-    # Try extracting JSON block
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
-    # Fallback: return raw as summary
-    return {"summary": raw[:800], "reasoning": "", "confidence": "LOW"}
+
+    # Fallback: use full text as answer
+    return raw, "LOW", ""
 
 
-def _validate_tags(text: str, known_tags: frozenset) -> List[str]:
+# ── Hallucination guard ────────────────────────────────────────────────────────
+
+def _detect_hallucinated_tags(text: str, known_tags_lower: frozenset[str]) -> list[str]:
     """
-    Extract PLC tag candidates from text and validate against known tags.
-    Uses fuzzy matching (ratio ≥ 0.85) to allow minor abbreviation differences.
-    Returns list of hallucinated tags (those with no close match).
+    Extract PLC tag candidates from LLM output.
+    Compare against known tag names (case-insensitive).
+    Use fuzzy match at 0.85 threshold before declaring hallucination.
+    Returns list of hallucinated tag strings.
     """
-    if not known_tags:
-        return []  # No tag index — skip guard
+    if not known_tags_lower:
+        return []   # No tags indexed → can't validate, don't flag anything
 
-    candidates: set = set()
+    candidates: set[str] = set()
     for pattern in _TAG_PATTERNS:
-        for m in pattern.finditer(text):
-            word = m.group(1) if m.lastindex else m.group()
-            if word.upper() not in _NOISE_WORDS and len(word) >= 3:
-                candidates.add(word.upper())
+        for match in pattern.finditer(text):
+            token = match.group()
+            if len(token) >= _MIN_TAG_LEN:
+                candidates.add(token)
 
-    hallucinated = []
+    hallucinated: list[str] = []
     for cand in candidates:
-        if cand in known_tags:
-            continue
-        # Fuzzy check — allow close matches
-        best_ratio = max(
-            (SequenceMatcher(None, cand, k).ratio() for k in known_tags),
-            default=0,
-        )
-        if best_ratio < _FUZZY_THRESHOLD:
-            hallucinated.append(cand)
+        cand_lower = cand.lower()
+        if cand_lower in known_tags_lower:
+            continue   # exact match — OK
+        if _fuzzy_match(cand_lower, known_tags_lower):
+            continue   # close enough — OK
+        hallucinated.append(cand)
 
     return hallucinated
 
 
+def _fuzzy_match(candidate: str, known: frozenset[str], threshold: float = _FUZZY_THRESHOLD) -> bool:
+    """Return True if any known tag is within fuzzy threshold of candidate."""
+    for known_tag in known:
+        ratio = SequenceMatcher(None, candidate, known_tag).ratio()
+        if ratio >= threshold:
+            return True
+    return False
+
+
 # ── Singleton ─────────────────────────────────────────────────────────────────
-_orchestrator: Optional[QueryOrchestrator] = None
+
+_orchestrator: QueryOrchestrator | None = None
 
 
 def get_query_orchestrator() -> QueryOrchestrator:

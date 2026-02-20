@@ -1,143 +1,194 @@
 """
-Project Knowledge Engine — API routes.
+Project Knowledge Engine API routes.
 
 Endpoints:
-  POST   /api/project/ingest   — Ingest a project folder
-  GET    /api/project/status   — Full readiness status
-  POST   /api/project/query    — Query the indexed project
-  DELETE /api/project/reset    — Purge all indexes
+  POST   /api/project/ingest   — Start ingestion (async)
+  GET    /api/project/status   — Full status + memory footprint
+  POST   /api/project/query    — 9-step orchestrated Q&A
   GET    /api/project/metrics  — Observability metrics
+  DELETE /api/project/reset    — Clear indexes for project
 """
-import logging
-from pathlib import Path
+from __future__ import annotations
 
-from fastapi import APIRouter, Query, status
+import logging
+from typing import Optional
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.core.project_exceptions import (
     HallucinatedTagError,
-    IngestionAlreadyRunningError,
-    IngestionFailedError,
-    ProjectIndexStaleError,
+    IngestionLockError,
     ProjectNotFoundError,
     ProjectNotReadyError,
+    ProjectStaleError,
 )
 from app.models.project_models import (
-    IngestRequest,
+    IngestionResult,
+    ProjectMetrics,
     ProjectQueryRequest,
     ProjectQueryResponse,
     ProjectStatus,
 )
+from app.services.project_context_manager import get_project_context_manager
+from app.services.project_ingestion_pipeline import get_ingestion_pipeline
+from app.services.query_orchestrator import get_query_orchestrator
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/project", tags=["Project Knowledge"])
 
 
-# ── POST /project/ingest ──────────────────────────────────────────────────────
+# ── Request models ─────────────────────────────────────────────────────────────
 
-@router.post("/ingest")
-def ingest_project(body: IngestRequest):
+class IngestRequest(BaseModel):
+    folder_path: str
+    project_id: str = "default"
+
+
+# ── POST /api/project/ingest ──────────────────────────────────────────────────
+
+@router.post("/ingest", response_model=IngestionResult)
+async def ingest_project(body: IngestRequest):
     """
-    Walk a project folder and index all supported files.
-    Returns 409 if ingestion is already running for this project.
+    Walk the folder, classify files, and populate StructuredIndex + SemanticIndex.
+    Returns IngestionResult with counts and any errors.
+    409 if ingestion is already running for this project.
     """
-    folder = Path(body.folder_path)
-    if not folder.is_dir():
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"error": "FOLDER_NOT_FOUND",
-                     "message": f"Folder not found: {body.folder_path}"},
-        )
     try:
-        from app.services.project_ingestion_pipeline import get_ingestion_pipeline
-        result = get_ingestion_pipeline().ingest(body.folder_path, body.project_id)
-        return result.model_dump()
-    except IngestionAlreadyRunningError as exc:
+        pipeline = get_ingestion_pipeline()
+        result = await pipeline.ingest(body.folder_path, body.project_id)
+        return result
+    except IngestionLockError as exc:
         return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={"error": exc.error_type, "message": exc.message},
+            status_code=409,
+            content={"error_type": exc.error_type, "message": exc.message},
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error_type": "INVALID_FOLDER", "message": str(exc)},
         )
     except Exception as exc:
-        logger.exception("Ingestion error for project '%s'", body.project_id)
+        logger.exception("Ingestion failed for project=%s", body.project_id)
         return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "INGESTION_FAILED", "message": str(exc)},
+            status_code=500,
+            content={"error_type": "INGESTION_FAILED", "message": str(exc)},
         )
 
 
-# ── GET /project/status ───────────────────────────────────────────────────────
+# ── GET /api/project/status ───────────────────────────────────────────────────
 
 @router.get("/status", response_model=ProjectStatus)
 def project_status(project_id: str = Query(default="default")):
     """
-    Return full readiness and ingestion metrics for a project.
-    Includes memory footprint, stale-index flag, and any warnings.
+    Return full project index status including memory footprint and warnings.
     """
-    from app.services.project_context_manager import get_project_context_manager
-    return get_project_context_manager().get_status(project_id)
+    ctx = get_project_context_manager()
+    status = ctx.get_status(project_id)
+
+    # Enrich with SemanticIndex chunk count
+    try:
+        from app.indexes.semantic_index import get_semantic_index
+        sem = get_semantic_index()
+        status.semantic_chunks = sem.collection_size(project_id)
+    except Exception:
+        pass
+
+    return status
 
 
-# ── POST /project/query ───────────────────────────────────────────────────────
+# ── POST /api/project/query ───────────────────────────────────────────────────
 
 @router.post("/query", response_model=ProjectQueryResponse)
-def query_project(body: ProjectQueryRequest):
+def project_query(body: ProjectQueryRequest):
     """
-    9-step orchestrated query:
-    readiness check → classify → structured lookup → semantic retrieval
-    → merge → prompt → LLM → validate → return.
-
-    Returns 503 if project not ready.
-    Returns 409 if index stale.
-    Returns 422 if LLM generates hallucinated tags.
+    Execute the 9-step orchestrated Q&A pipeline.
+    412 if project not indexed.
+    409 if index is stale — re-ingest required.
     """
     try:
-        from app.services.query_orchestrator import get_query_orchestrator
-        return get_query_orchestrator().query(body)
+        orch = get_query_orchestrator()
+        return orch.query(body)
     except ProjectNotReadyError as exc:
         return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"error": exc.error_type, "message": exc.message},
+            status_code=412,
+            content={
+                "error_type": exc.error_type,
+                "message": exc.message,
+                "action": f"POST /api/project/ingest with project_id='{body.project_id}'",
+            },
         )
-    except ProjectIndexStaleError as exc:
+    except ProjectStaleError as exc:
         return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={"error": exc.error_type, "message": exc.message,
-                     "reindex_required": True},
+            status_code=409,
+            content={
+                "error_type": exc.error_type,
+                "message": exc.message,
+                "action": f"POST /api/project/ingest to rebuild the index.",
+            },
         )
-    except HallucinatedTagError as exc:
+    except ProjectNotFoundError as exc:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={"error": exc.error_type, "message": exc.message,
-                     "hallucinated_tags": exc.tags},
+            status_code=404,
+            content={"error_type": exc.error_type, "message": exc.message},
         )
     except Exception as exc:
-        logger.exception("Query error for project '%s'", body.project_id)
+        logger.exception("Query failed for project=%s", body.project_id)
         return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "QUERY_FAILED", "message": str(exc)},
+            status_code=500,
+            content={"error_type": "QUERY_FAILED", "message": str(exc)},
         )
 
 
-# ── DELETE /project/reset ─────────────────────────────────────────────────────
+# ── GET /api/project/metrics ──────────────────────────────────────────────────
 
-@router.delete("/reset")
-def reset_project(project_id: str = Query(default="default")):
-    """Purge all StructuredIndex and SemanticIndex data for this project."""
-    from app.services.project_context_manager import get_project_context_manager
-    get_project_context_manager().reset(project_id)
-    return {"status": "reset", "project_id": project_id}
-
-
-# ── GET /project/metrics ──────────────────────────────────────────────────────
-
-@router.get("/metrics")
+@router.get("/metrics", response_model=ProjectMetrics)
 def project_metrics(project_id: str = Query(default="default")):
     """
-    Observability metrics:
-    - structured_memory_mb
-    - semantic_chunk_count
-    - tags, routines, aois, io_rows
-    - ingestion_duration_s
+    Observability endpoint: embedding count, memory usage, ingestion duration.
     """
+    from app.indexes.structured_index import get_structured_index
+    from app.indexes.semantic_index import get_semantic_index
     from app.services.project_context_manager import get_project_context_manager
-    return get_project_context_manager().get_metrics(project_id)
+
+    si = get_structured_index(project_id)
+    si_stats = si.stats()
+    ctx = get_project_context_manager()
+    status = ctx.get_status(project_id)
+
+    sem_count = 0
+    try:
+        sem = get_semantic_index()
+        sem_count = sem.collection_size(project_id)
+    except Exception:
+        pass
+
+    return ProjectMetrics(
+        project_id=project_id,
+        embedding_count=sem_count,
+        vector_db_collection_size=sem_count,
+        structured_index_tags=si_stats.tags,
+        structured_index_routines=si_stats.routines,
+        memory_usage_mb=si_stats.memory_footprint_mb,
+        ingestion_duration_ms=status.ingestion_duration_ms,
+        last_index_time=status.last_index_time,
+    )
+
+
+# ── DELETE /api/project/reset ─────────────────────────────────────────────────
+
+@router.delete("/reset")
+def project_reset(project_id: str = Query(default="default")):
+    """Clear all indexes and reset project state."""
+    from app.indexes.structured_index import clear_structured_index
+    from app.indexes.semantic_index import get_semantic_index
+
+    clear_structured_index(project_id)
+    try:
+        get_semantic_index().delete_project(project_id)
+    except Exception as exc:
+        logger.warning("SemanticIndex delete failed: %s", exc)
+
+    get_project_context_manager().reset(project_id)
+    return {"status": "reset", "project_id": project_id}
