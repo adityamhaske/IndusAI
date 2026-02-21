@@ -21,12 +21,10 @@ class StructuredLLMOutput(BaseModel):
     Schema the LLM must return (strict JSON).
     Backend parses, validates, and rejects/retries if malformed.
     """
-    summary: str
-    likely_causes: List[str] = Field(default_factory=list)
-    diagnostic_steps: List[str] = Field(default_factory=list)
-    preventive_actions: List[str] = Field(default_factory=list)
-    related_plc_tags: List[str] = Field(default_factory=list)
-    confidence_explanation: str = ""
+    diagnosis: str
+    metrics: Dict[str, Any]
+    primary_action: str
+    confidence: str
 
 
 class FaultAnalysisV2Response(BaseModel):
@@ -41,15 +39,14 @@ class FaultAnalysisV2Response(BaseModel):
 
     # Deterministic (never computed by LLM)
     confidence: str                       # LOW / MEDIUM / HIGH
+    # Original Deterministic Stats (kept for backend tracking)
     statistics: Dict[str, Any]
 
-    # LLM output
-    summary: str
-    likely_causes: List[str]
-    diagnostic_steps: List[str]
-    preventive_actions: List[str]
-    related_plc_tags: List[str]
-    confidence_explanation: str
+    # New Minimal UI Schema mapped from LLM + Stats
+    diagnosis: str
+    evidence: Dict[str, Any]
+    primary_action: str
+    confidence: str
 
     # RAG sources
     docs_used: int

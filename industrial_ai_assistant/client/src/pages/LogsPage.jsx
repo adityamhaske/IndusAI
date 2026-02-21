@@ -142,41 +142,47 @@ const LogsPage = () => {
                     </section>
                 )}
 
-                {/* Table + Panel */}
+                {/* Table */}
                 {uploadInfo && (
-                    <section className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-                        {/* Table — takes 2/3 */}
-                        <div className="xl:col-span-2">
-                            <h2 className="text-sm font-semibold text-industrial-600 uppercase tracking-wide mb-3">
-                                Fault Log ({uploadInfo.total_rows?.toLocaleString()} rows)
-                            </h2>
-                            <VirtualizedFaultTable
-                                totalRows={uploadInfo.total_rows}
-                                fetchPage={fetchPage}
-                                onRowSelect={handleRowSelect}
-                                selectedRowId={selectedFault?.row_id}
-                            />
-                        </div>
-
-                        {/* Selected Fault Panel — 1/3 */}
-                        <div className="xl:col-span-1">
-                            <h2 className="text-sm font-semibold text-industrial-600 uppercase tracking-wide mb-3">
-                                Fault Detail
-                            </h2>
-                            <SelectedFaultPanel
-                                fault={selectedFault}
-                                detail={faultDetail}
-                                analysis={analysis}
-                                analysisError={analysisError}
-                                systemStatus={systemStatus}
-                                isAnalyzing={isAnalyzing}
-                                onAnalyze={handleAnalyze}
-                                datasetHash={uploadInfo?.dataset_hash}
-                            />
-                        </div>
+                    <section>
+                        <h2 className="text-sm font-semibold text-industrial-600 uppercase tracking-wide mb-3">
+                            Fault Log ({uploadInfo.total_rows?.toLocaleString()} rows)
+                        </h2>
+                        <VirtualizedFaultTable
+                            totalRows={uploadInfo.total_rows}
+                            fetchPage={fetchPage}
+                            onRowSelect={handleRowSelect}
+                            selectedRowId={selectedFault?.row_id}
+                        />
                     </section>
                 )}
             </div>
+
+            {/* AI Analysis Drawer (Slide-in from right) */}
+            {selectedFault && (
+                <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
+                    {/* Backdrop */}
+                    <div
+                        className="absolute inset-0 bg-industrial-900/20 backdrop-blur-sm transition-opacity"
+                        onClick={() => setSelectedFault(null)}
+                    ></div>
+
+                    {/* Drawer Panel */}
+                    <div className="relative w-full max-w-[360px] bg-white shadow-2xl h-full flex flex-col animate-slide-in-right border-l border-industrial-200">
+                        <SelectedFaultPanel
+                            fault={selectedFault}
+                            detail={faultDetail}
+                            analysis={analysis}
+                            analysisError={analysisError}
+                            systemStatus={systemStatus}
+                            isAnalyzing={isAnalyzing}
+                            onAnalyze={handleAnalyze}
+                            datasetHash={uploadInfo?.dataset_hash}
+                            onClose={() => setSelectedFault(null)}
+                        />
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

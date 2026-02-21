@@ -18,14 +18,17 @@ PROMPT_VERSION = "project_v2.0"
 MAX_TOKENS = 3500
 _CHARS_PER_TOKEN = 4    # conservative estimate
 
-_SYSTEM_RULES = """
-STRICT OUTPUT CONTRACT — you MUST follow these rules exactly:
+def get_system_rules(intent_type: str) -> str:
+    base_rules = """STRICT OUTPUT CONTRACT — you MUST follow these rules exactly:
 
 1. You MUST NOT invent PLC tag names. Only reference tags explicitly listed in STRUCTURED DATA.
 2. You MUST NOT reference documents not listed in DOCUMENTATION CONTEXT.
 3. If uncertain, state that explicitly — do not guess.
 4. Respond ONLY in valid JSON. No explanation outside the JSON. No markdown fences.
+"""
 
+    if intent_type == "FAULT_ANALYSIS":
+        schema = """
 Return a JSON object with EXACTLY these keys (no others):
 {
   "summary": "<concise direct answer to the question>",
@@ -36,14 +39,36 @@ Return a JSON object with EXACTLY these keys (no others):
   "confidence": "<LOW|MEDIUM|HIGH>"
 }
 """
-
-
+    elif intent_type == "FILE_EXPLANATION":
+        schema = """
+Return a JSON object with EXACTLY these keys (no others):
+{
+  "summary": "<concise summary of the file>",
+  "structure_breakdown": ["<section 1>", "<section 2>"],
+  "key_fields_explained": ["<field 1 explanation>"],
+  "engineering_insight": "<deeper technical context>",
+  "examples": ["<example 1>"],
+  "confidence": "<LOW|MEDIUM|HIGH>"
+}
+"""
+    else:
+        # GENERAL_QUERY or SYSTEM_FLOW
+        schema = """
+Return a JSON object with EXACTLY these keys (no others):
+{
+  "explanation": "<detailed explanation answering the query>",
+  "supporting_sources": ["<source 1>", "<source 2>"],
+  "confidence": "<LOW|MEDIUM|HIGH>"
+}
+"""
+    return base_rules + schema
 
 def build(
     question: str,
     intent_labels: list[str],
     structured_hits: list[StructuredHit],
     semantic_chunks: list[ScoredChunk],
+    intent_type: str = "GENERAL_QUERY",
 ) -> tuple[str, bool, int]:
     """
     Build the LLM prompt. Enforces token budget.
@@ -72,7 +97,8 @@ def build(
 
     # ── Semantic documentation section ────────────────────────────────────────
     # Enforce token budget: structured + rules are fixed cost; semantic is variable
-    fixed_text = "\n".join(sections) + _SYSTEM_RULES
+    system_rules = get_system_rules(intent_type)
+    fixed_text = "\n".join(sections) + system_rules
     fixed_tokens = _estimate_tokens(fixed_text)
     budget_for_semantic = MAX_TOKENS - fixed_tokens - 50  # 50 token safety margin
 
@@ -106,7 +132,7 @@ def build(
     sections.append("\n".join(sem_lines))
 
     # ── Rules — always last ───────────────────────────────────────────────────
-    sections.append(_SYSTEM_RULES)
+    sections.append(system_rules)
 
     prompt = "\n".join(sections)
     total_tokens = _estimate_tokens(prompt)

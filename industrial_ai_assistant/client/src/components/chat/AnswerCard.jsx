@@ -71,82 +71,123 @@ function Collapsible({ title, children }) {
 }
 
 // ── Main AnswerCard ────────────────────────────────────────────────────────────
-/**
- * Renders a structured LLM answer from KnowledgeQueryResponse.
- *
- * Expected shape of `data`:
- *   summary, root_causes[], recommended_actions[], supporting_evidence[],
- *   limitations[], confidence, knowledge_mode, prompt_version,
- *   structured_hits[], documentation_sources[], hallucinated_tags_removed[],
- *   warnings[]
- */
 const AnswerCard = ({ data }) => {
-    // Parse summary — may itself be a JSON string from older responses
-    let summary = data.summary || '';
-    let rootCauses = data.root_causes || [];
-    let recommendedActions = data.recommended_actions || [];
-    let supportingEvidence = data.supporting_evidence || [];
-    let limitations = data.limitations || [];
-    let confidence = data.confidence || 'LOW';
+    const intentType = data.intent_type || 'GENERAL_QUERY';
 
-    // Backward-compat: if summary looks like JSON (old format), parse it
-    if (summary.trim().startsWith('{')) {
+    // Parse the inner Pydantic JSON string
+    let parsed = {};
+    if (typeof data.answer === 'string' && data.answer.trim().startsWith('{')) {
         try {
-            const parsed = JSON.parse(summary);
-            rootCauses = parsed.root_causes || parsed.likely_causes || rootCauses;
-            recommendedActions = parsed.recommended_actions || parsed.resolution_steps || recommendedActions;
-            supportingEvidence = parsed.supporting_evidence || parsed.source_sections || supportingEvidence;
-            limitations = parsed.limitations || [parsed.limitations] || limitations;
-            confidence = parsed.confidence || confidence;
-            summary = parsed.summary || parsed.answer || summary;
-        } catch { /* leave as-is */ }
+            parsed = JSON.parse(data.answer);
+        } catch {
+            parsed = { explanation: data.answer }; // Fallback
+        }
+    } else {
+        // Just in case it's already an object
+        parsed = typeof data.answer === 'object' ? data.answer : { explanation: String(data.answer || '') };
     }
 
-    // Merge structured hits and documentation sources into evidence
+    // Merge structured hits and documentation sources into evidence for all schemas
     const structuredEvidence = (data.structured_hits || []).map(h =>
         `[${h.hit_type?.toUpperCase()}] ${h.data?.name || h.data?.slot || JSON.stringify(h.data).slice(0, 60)}`
     );
-    const docSources = (data.documentation_sources || []).map(src =>
+    const docSources = (data.semantic_sources || data.documentation_sources || []).map(src =>
         `📄 ${src.split('/').pop()}`
     );
-    const allEvidence = [...supportingEvidence, ...structuredEvidence, ...docSources].filter(Boolean);
+
+    // Render specific layout inside a wrapper
+    const renderContent = () => {
+        if (intentType === 'FAULT_ANALYSIS') {
+            const rootCauses = parsed.root_causes || [];
+            const recActions = parsed.recommended_actions || [];
+            const limitations = parsed.limitations || [];
+            const allEvidence = [...(parsed.supporting_evidence || []), ...structuredEvidence, ...docSources].filter(Boolean);
+
+            return (
+                <div className="space-y-4">
+                    <Section icon={Lightbulb} color="text-primary-600" title="Summary">
+                        <p className="text-sm text-industrial-800 leading-relaxed font-medium">{parsed.summary}</p>
+                    </Section>
+                    {rootCauses.length > 0 && (
+                        <Section icon={AlertTriangle} color="text-orange-600" title="Root Causes">
+                            <BulletList items={rootCauses} />
+                        </Section>
+                    )}
+                    {recActions.length > 0 && (
+                        <Section icon={Wrench} color="text-blue-600" title="Recommended Actions">
+                            <BulletList items={recActions} ordered />
+                        </Section>
+                    )}
+                    {allEvidence.length > 0 && (
+                        <Section icon={BookOpen} color="text-industrial-400" title="Supporting Evidence">
+                            <Collapsible title={`${allEvidence.length} source${allEvidence.length > 1 ? 's' : ''}`}>
+                                <BulletList items={allEvidence} dim />
+                            </Collapsible>
+                        </Section>
+                    )}
+                    {limitations.length > 0 && (
+                        <Section icon={ShieldAlert} color="text-industrial-400" title="Limitations">
+                            <BulletList items={limitations} dim />
+                        </Section>
+                    )}
+                </div>
+            );
+        }
+
+        if (intentType === 'FILE_EXPLANATION') {
+            const structure = parsed.structure_breakdown || [];
+            const fields = parsed.key_fields_explained || [];
+            const examples = parsed.examples || [];
+            return (
+                <div className="space-y-4">
+                    <Section icon={Lightbulb} color="text-primary-600" title="Summary">
+                        <p className="text-sm text-industrial-800 leading-relaxed font-medium">{parsed.summary}</p>
+                    </Section>
+                    {structure.length > 0 && (
+                        <Section icon={Database} color="text-blue-600" title="Structure Breakdown">
+                            <BulletList items={structure} />
+                        </Section>
+                    )}
+                    {parsed.engineering_insight && (
+                        <Section icon={Wrench} color="text-purple-600" title="Engineering Insight">
+                            <p className="text-sm text-industrial-700 leading-relaxed">{parsed.engineering_insight}</p>
+                        </Section>
+                    )}
+                    {fields.length > 0 && (
+                        <Section icon={BookOpen} color="text-industrial-600" title="Key Fields">
+                            <BulletList items={fields} />
+                        </Section>
+                    )}
+                    {examples.length > 0 && (
+                        <Section icon={Zap} color="text-green-600" title="Examples">
+                            <BulletList items={examples} />
+                        </Section>
+                    )}
+                </div>
+            );
+        }
+
+        // GENERAL_QUERY or SYSTEM_FLOW fallback
+        const allSources = [...(parsed.supporting_sources || []), ...structuredEvidence, ...docSources].filter(Boolean);
+        return (
+            <div className="space-y-4">
+                <Section icon={Lightbulb} color="text-primary-600" title="Explanation">
+                    <p className="text-sm text-industrial-800 leading-relaxed font-medium whitespace-pre-wrap">{parsed.explanation}</p>
+                </Section>
+                {allSources.length > 0 && (
+                    <Section icon={BookOpen} color="text-industrial-400" title="Sources">
+                        <Collapsible title={`${allSources.length} source${allSources.length > 1 ? 's' : ''}`}>
+                            <BulletList items={allSources} dim />
+                        </Collapsible>
+                    </Section>
+                )}
+            </div>
+        );
+    };
 
     return (
         <div className="space-y-4">
-            {/* ── Summary ─────────────────────────────────────────────────── */}
-            <Section icon={Lightbulb} color="text-primary-600" title="Summary">
-                <p className="text-sm text-industrial-800 leading-relaxed font-medium">{summary}</p>
-            </Section>
-
-            {/* ── Root Causes ─────────────────────────────────────────────── */}
-            {rootCauses.length > 0 && (
-                <Section icon={AlertTriangle} color="text-orange-600" title="Root Causes">
-                    <BulletList items={rootCauses} />
-                </Section>
-            )}
-
-            {/* ── Recommended Actions ─────────────────────────────────────── */}
-            {recommendedActions.length > 0 && (
-                <Section icon={Wrench} color="text-blue-600" title="Recommended Actions">
-                    <BulletList items={recommendedActions} ordered />
-                </Section>
-            )}
-
-            {/* ── Supporting Evidence (collapsible) ───────────────────────── */}
-            {allEvidence.length > 0 && (
-                <Section icon={BookOpen} color="text-industrial-400" title="Supporting Evidence">
-                    <Collapsible title={`${allEvidence.length} source${allEvidence.length > 1 ? 's' : ''}`}>
-                        <BulletList items={allEvidence} dim />
-                    </Collapsible>
-                </Section>
-            )}
-
-            {/* ── Limitations ─────────────────────────────────────────────── */}
-            {limitations.length > 0 && (
-                <Section icon={ShieldAlert} color="text-industrial-400" title="Limitations">
-                    <BulletList items={limitations} dim />
-                </Section>
-            )}
+            {renderContent()}
 
             {/* ── Hallucination warning ────────────────────────────────────── */}
             {data.hallucinated_tags_removed?.length > 0 && (
@@ -166,8 +207,8 @@ const AnswerCard = ({ data }) => {
 
             {/* ── Footer: mode + confidence + version ─────────────────────── */}
             <div className="flex items-center gap-2 pt-1 border-t border-industrial-100 flex-wrap">
-                <KnowledgeModeBadge mode={data.knowledge_mode} />
-                <ConfidenceBadge level={confidence} />
+                {intentType === 'FAULT_ANALYSIS' && <KnowledgeModeBadge mode={data.knowledge_mode} />}
+                <ConfidenceBadge level={data.confidence || parsed.confidence || 'LOW'} />
                 <span className="text-[10px] text-industrial-300 font-mono ml-auto">
                     {data.prompt_version}
                     {data.total_latency_ms > 0 && ` · ${data.total_latency_ms.toFixed(0)}ms`}

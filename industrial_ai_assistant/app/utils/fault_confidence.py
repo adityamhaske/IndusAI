@@ -13,24 +13,31 @@ ConfidenceLevel = Literal["LOW", "MEDIUM", "HIGH"]
 
 
 def compute_confidence(
-    occurrences_1h: int,
     burst_detected: bool,
-    occurrences_24h: int = 0,
+    anomaly_score: float,
+    integrity_passed: bool,
+    occurrences_1h: int
 ) -> ConfidenceLevel:
     """
-    Deterministic confidence based on fault frequency and burst intensity.
+    Deterministic confidence based on fault frequency, burst intensity, and data integrity.
 
     Args:
-        occurrences_1h:  Count of same fault in the trailing 1 hour.
-        burst_detected:  Whether a fault burst was detected globally.
-        occurrences_24h: Count in trailing 24 hours (reserved for future refinement).
+        burst_detected:   Whether a fault burst was detected globally.
+        anomaly_score:    Ratio of recent occurrences vs historical average.
+        integrity_passed: Whether the metrics conceptually align (e.g. no 0 counts during a burst).
+        occurrences_1h:   Count of same fault in the trailing 1 hour.
 
     Returns:
         "HIGH" | "MEDIUM" | "LOW"
     """
-    if occurrences_1h >= 10 and burst_detected:
-        return "HIGH"
-    elif occurrences_1h >= 3:
-        return "MEDIUM"
-    else:
+    if not integrity_passed:
+        # If the data contradicts itself, we cannot have high confidence in any diagnosis.
         return "LOW"
+
+    if burst_detected and anomaly_score > 3.0:
+        return "HIGH"
+    
+    if occurrences_1h >= 3 or anomaly_score > 1.5:
+        return "MEDIUM"
+        
+    return "LOW"

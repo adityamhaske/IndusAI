@@ -55,8 +55,8 @@ const Message = ({ msg }) => {
     );
 };
 
-// ── Scope Controls ─────────────────────────────────────────────────────────────
-const ScopeControls = () => {
+// ── Scope Controls (Compact Chip) ──────────────────────────────────────────────
+const ScopeChip = () => {
     const selectedFiles = useAppStore(s => s.selectedFiles);
     const selectedFolders = useAppStore(s => s.selectedFolders);
     const scopeMode = useAppStore(s => s.scopeMode);
@@ -65,38 +65,37 @@ const ScopeControls = () => {
     const count = selectedFiles.length + selectedFolders.length;
 
     return (
-        <div className="flex items-center gap-4 px-5 py-3 bg-industrial-50 border-b border-industrial-100 flex-wrap">
-            <div className="flex items-center gap-2">
-                <span className="text-xs font-medium text-industrial-500 uppercase tracking-wider">Scope Mode</span>
+        <div className="px-5 pt-3 flex items-center gap-3 flex-wrap">
+            {count > 0 && (
+                <div className="flex items-center gap-1.5 text-xs bg-primary-50 border border-primary-200 text-primary-700 px-2.5 py-1 rounded-full shrink-0">
+                    <Database className="w-3 h-3" />
+                    <span className="font-medium">Scoped to {count} item{count !== 1 && 's'}</span>
+                </div>
+            )}
+
+            <div className="flex items-center gap-1.5 shrink-0 bg-industrial-100 rounded-full px-2 py-1">
+                <span className="text-[10px] font-bold text-industrial-500 uppercase tracking-wider pl-1">Mode:</span>
                 <select
                     value={scopeMode}
                     onChange={e => setScopeMode(e.target.value)}
-                    className="text-xs border border-industrial-200 rounded px-2 py-1.5 bg-white text-industrial-700 outline-none focus:border-primary-400 font-medium"
+                    className="text-xs border-0 bg-transparent text-industrial-700 hover:text-industrial-900 outline-none cursor-pointer font-medium p-0 focus:ring-0"
                 >
-                    <option value="GLOBAL">GLOBAL (Search everything)</option>
-                    <option value="PREFER">PREFER (Rank selections higher)</option>
-                    <option value="STRICT">STRICT (Search only selections)</option>
+                    <option value="GLOBAL">GLOBAL</option>
+                    <option value="PREFER">PREFER</option>
+                    <option value="STRICT">STRICT</option>
                 </select>
             </div>
 
-            {count > 0 && (
-                <div className="flex items-center gap-1.5 text-xs bg-primary-50 border border-primary-200 text-primary-700 px-2 py-1 rounded">
-                    <Database className="w-3 h-3" />
-                    <span className="font-medium">Scoped to {count} item{count !== 1 && 's'}</span>
-                    <span className="opacity-70 font-mono text-[10px]">({scopeMode})</span>
-                </div>
-            )}
-
             {scopeMode === 'STRICT' && count === 0 && (
-                <div className="text-xs text-red-600 flex items-center gap-1.5 font-medium">
+                <div className="text-xs text-red-600 flex items-center gap-1 font-medium ml-1">
                     <AlertTriangle className="w-3.5 h-3.5" />
-                    Select files or folders to search in STRICT mode.
+                    Select files for STRICT mode
                 </div>
             )}
             {count > 100 && (
-                <div className="text-xs text-orange-600 flex items-center gap-1.5 font-medium">
+                <div className="text-xs text-orange-600 flex items-center gap-1 font-medium ml-1">
                     <AlertTriangle className="w-3.5 h-3.5" />
-                    Warning: Large selection may slow down search.
+                    Large selection may slow search
                 </div>
             )}
         </div>
@@ -212,8 +211,6 @@ const ChatPage = () => {
 
     return (
         <div className="flex flex-row h-full overflow-hidden bg-industrial-50">
-            {knowledgeStatus?.project_loaded && <ProjectExplorer />}
-
             <div className="flex-1 flex flex-col min-w-0 h-full">
                 {/* Knowledge mode banner */}
                 <div className="bg-white border-b border-industrial-200 px-6 py-2.5 flex items-center gap-3 flex-shrink-0">
@@ -252,11 +249,14 @@ const ChatPage = () => {
                 {/* Input */}
                 <div className="bg-white border-t border-industrial-200 flex-shrink-0">
                     <div className="max-w-4xl mx-auto w-full border-x border-industrial-200">
-                        {knowledgeStatus?.project_loaded && <ScopeControls />}
+                        {knowledgeStatus?.project_loaded && <ScopeChip />}
                         <InputBar onSend={handleSend} disabled={isLoading || isStrictInvalid} />
                     </div>
                 </div>
             </div>
+
+            {/* Project Explorer Drawer on Right */}
+            {knowledgeStatus?.project_loaded && <ProjectExplorer />}
         </div>
     );
 };

@@ -35,35 +35,23 @@ class FaultResponseValidator:
         hallucinated: List[str] = []
 
         # ── 1. Field completeness checks ──────────────────────────────────────
-        if not output.summary or len(output.summary.strip()) < 10:
-            warnings.append("LLM summary is empty or too short.")
+        if not output.diagnosis or len(output.diagnosis.strip()) < 10:
+            warnings.append("LLM diagnosis is empty or too short.")
             if not is_retry:
-                output.summary = "Analysis summary unavailable — LLM returned insufficient content."
+                output.diagnosis = "Analysis unavailable — LLM returned insufficient content."
 
-        if not output.likely_causes:
-            warnings.append("LLM returned no likely causes.")
+        if not output.primary_action:
+            warnings.append("LLM returned no primary action.")
 
-        if not output.diagnostic_steps:
-            warnings.append("LLM returned no diagnostic steps.")
-
-        # ── 2. Hallucination check: PLC tags ─────────────────────────────────
-        if known_tags and output.related_plc_tags:
-            clean_tags = []
-            for tag in output.related_plc_tags:
-                if tag in known_tags:
-                    clean_tags.append(tag)
-                else:
-                    hallucinated.append(tag)
-                    logger.warning("Hallucinated PLC tag removed: %s", tag)
-            output.related_plc_tags = clean_tags
-            if hallucinated:
-                warnings.append(
-                    f"Removed {len(hallucinated)} hallucinated tag(s): {hallucinated}"
-                )
+        # ── 2. Tag hallucination check ─────────────────
+        # Note: the new schema removed the explicit `related_plc_tags` list, so we skip the explicit list filtering
+        # and instead rely on the orchestrator's generic hallucination scanner if implemented.
+        # But for backward compatibility with the validator contract:
+        pass
 
         # ── 3. Truncate overly long free-text fields ──────────────────────────
-        if len(output.summary) > 2000:
-            output.summary = output.summary[:2000] + "…"
-            warnings.append("Summary truncated to 2000 chars.")
+        if len(output.diagnosis) > 1000:
+            output.diagnosis = output.diagnosis[:1000] + "…"
+            warnings.append("Diagnosis truncated to 1000 chars.")
 
         return output, hallucinated, warnings

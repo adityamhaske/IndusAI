@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── Structured record types ────────────────────────────────────────────────────
@@ -139,12 +139,20 @@ class QueryType(str, Enum):
     UNKNOWN             = "UNKNOWN"
 
 
+class IntentType(str, Enum):
+    FAULT_ANALYSIS = "FAULT_ANALYSIS"
+    FILE_EXPLANATION = "FILE_EXPLANATION"
+    SYSTEM_FLOW = "SYSTEM_FLOW"
+    GENERAL_QUERY = "GENERAL_QUERY"
+
+
 class QueryIntent(BaseModel):
     labels: list[QueryType]
     structured_required: bool
     semantic_required: bool
     progress_required: bool
     raw_query: str
+    intent_type: str = IntentType.GENERAL_QUERY.value
 
 
 # ── Query request & response ──────────────────────────────────────────────────
@@ -163,9 +171,34 @@ class StructuredHit(BaseModel):
     data: dict[str, Any]
 
 
+# ── Response Schemas ──────────────────────────────────────────────────────────
+
+class FaultAnalysisResponseModel(BaseModel):
+    summary: str
+    root_causes: list[str] = Field(default_factory=list)
+    recommended_actions: list[str] = Field(default_factory=list)
+    supporting_evidence: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    confidence: Literal["LOW", "MEDIUM", "HIGH"] = "LOW"
+
+class FileExplanationResponseModel(BaseModel):
+    summary: str
+    structure_breakdown: list[str] = Field(default_factory=list)
+    key_fields_explained: list[str] = Field(default_factory=list)
+    engineering_insight: str = ""
+    examples: list[str] = Field(default_factory=list)
+    confidence: Literal["LOW", "MEDIUM", "HIGH"] = "LOW"
+
+class GeneralQueryResponseModel(BaseModel):
+    explanation: str
+    supporting_sources: list[str] = Field(default_factory=list)
+    confidence: Literal["LOW", "MEDIUM", "HIGH"] = "LOW"
+
+
 class ProjectQueryResponse(BaseModel):
     question: str
     project_id: str
+    intent_type: str = IntentType.GENERAL_QUERY.value
     query_intent: QueryIntent
     structured_hits: list[StructuredHit] = Field(default_factory=list)
     semantic_sources: list[str] = Field(default_factory=list)
@@ -176,3 +209,4 @@ class ProjectQueryResponse(BaseModel):
     llm_latency_ms: float = 0.0
     total_latency_ms: float = 0.0
     warnings: list[str] = Field(default_factory=list)
+    context_scope: dict[str, Any] = Field(default_factory=dict)

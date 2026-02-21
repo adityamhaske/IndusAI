@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-from app.models.project_models import QueryIntent, QueryType
+from app.models.project_models import QueryIntent, QueryType, IntentType
 
 # ── Rule patterns —————————————————————————————————————————————————————————────
 # Each entry: (QueryType, list_of_patterns_any_of_which_triggers_the_label)
@@ -122,10 +122,21 @@ def classify(query: str) -> QueryIntent:
     if QueryType.UNKNOWN in matched:
         semantic_required = True
 
+    # ── Strict Intent Hierarchy Selection ─────────────────────────────────────
+    intent_type = IntentType.GENERAL_QUERY.value
+    
+    if re.search(r"\b(explain|describe|summarize).*(file|document)\b|\.[a-zA-Z0-9]{2,4}\b", q):
+        intent_type = IntentType.FILE_EXPLANATION.value
+    elif re.search(r"\b(fault|alarm|error|diagnostic|issue|failed|alm_\d+|err_\d+|trip|why did)\b", q):
+        intent_type = IntentType.FAULT_ANALYSIS.value
+    elif re.search(r"\b(flow|routine|sequence|ladder|sfc|state machine|architecture|process|how does|what does)\b", q):
+        intent_type = IntentType.SYSTEM_FLOW.value
+
     return QueryIntent(
         labels=matched,
         structured_required=structured_required,
         semantic_required=semantic_required,
         progress_required=progress_required,
         raw_query=query,
+        intent_type=intent_type,
     )

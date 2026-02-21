@@ -44,8 +44,11 @@ from app.services.rag_service import RAGService
 from app.utils.fault_confidence import compute_confidence
 from app.utils.fault_statistics import (
     _timestamps_for_code,
+    check_metric_integrity,
     compute_cooccurrence,
     compute_occurrences_in_window,
+    compute_rolling_metrics,
+    compute_trend,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,12 +57,18 @@ logger = logging.getLogger(__name__)
 _DEBUG_LLM = os.getenv("DEBUG_LLM", "false").lower() in ("1", "true", "yes")
 
 _LLM_JSON_SCHEMA = """{
-  "summary": "<overall explanation of the fault>",
-  "likely_causes": ["<cause 1>", "<cause 2>"],
-  "diagnostic_steps": ["<step 1>", "<step 2>"],
-  "preventive_actions": ["<action 1>"],
-  "related_plc_tags": ["<tag_name>"],
-  "confidence_explanation": "<why this fault is LOW/MEDIUM/HIGH confidence>"
+  "diagnosis": "<Max 3 lines. Concise. No filler. No speculations.>",
+  "metrics": {
+    "occurrences_1h": <int>,
+    "occurrences_24h": <int>,
+    "burst_detected": <bool>,
+    "burst_window_minutes": <float>,
+    "burst_count": <int>,
+    "co_occurrence": [{"fault": "<str>", "count": <int>}],
+    "trend": "<RISING | STABLE | DECLINING>"
+  },
+  "primary_action": "<Single concrete, targeted technical action.>",
+  "confidence": "<LOW | MEDIUM | HIGH>"
 }"""
 
 # Fallback OUTPUT is removed — failures now raise explicit exceptions.
@@ -128,14 +137,30 @@ class FaultAnalysisOrchestrator:
         severity = str(row.get("severity", "")) if row.get("severity") else "Unknown"
         ref_ts = row["timestamp"].to_pydatetime()
 
-        # ── Step 2: Deterministic stats (never done by LLM) ──────────────────
+        # ── Step 2: Deterministic stats & Advanced Metrics (v3) ──────────────────
         ts_list = _timestamps_for_code(df, fault_code)
+        
+        # Original metrics
         occ_1h  = compute_occurrences_in_window(ts_list, ref_ts, hours=1)
         occ_24h = compute_occurrences_in_window(ts_list, ref_ts, hours=24)
         co_fault, co_count = compute_cooccurrence(df, ref_ts)
         burst = ds.stats_cache.get("burst_detected", False)
         burst_desc = ds.stats_cache.get("burst_description", "")
-        confidence = compute_confidence(occ_1h, burst, occ_24h)
+        burst_count = ds.stats_cache.get("burst_count", 0)
+        
+        # Advanced v3 metrics
+        rolling_avg_5m, rolling_avg_1h, delta_last_30m, anomaly_score = compute_rolling_metrics(ts_list, ref_ts)
+        trend = compute_trend(delta_last_30m, rolling_avg_1h)
+        
+        # Integrity validation
+        integrity_passed = check_metric_integrity(burst, burst_count, occ_1h)
+        
+        confidence = compute_confidence(
+            burst_detected=burst,
+            anomaly_score=anomaly_score,
+            integrity_passed=integrity_passed,
+            occurrences_1h=occ_1h
+        )
 
         statistics = {
             "occurrences_last_hour": occ_1h,
@@ -144,7 +169,14 @@ class FaultAnalysisOrchestrator:
             "cooccurrence_count": co_count,
             "burst_detected": burst,
             "burst_description": burst_desc,
+            "burst_count": burst_count,
             "confidence": confidence,
+            "rolling_avg_5m": rolling_avg_5m,
+            "rolling_avg_1h": rolling_avg_1h,
+            "delta_last_30m": delta_last_30m,
+            "anomaly_score": anomaly_score,
+            "trend": trend,
+            "integrity_passed": integrity_passed
         }
 
         # ── Step 3: RAG retrieval ─────────────────────────────────────────────
@@ -156,7 +188,44 @@ class FaultAnalysisOrchestrator:
             project_id=request.project_id,
         )
 
-        # ── Step 4: Build prompt ──────────────────────────────────────────────
+        # ── Step 4: Build prompt & Check Integrity ────────────────────────────
+        if not integrity_passed:
+            logger.warning("Stat integrity failed for row %d. Bypassing LLM.", request.row_id)
+            total_ms = (time.perf_counter() - t_total_start) * 1000
+            
+            # Construct a synthetic successful response masking the LLM output
+            synthetic_evidence = {
+                "occurrences_1h": occ_1h,
+                "occurrences_24h": occ_24h,
+                "burst_detected": burst,
+                "burst_window_minutes": 10.0, # Defaulting from stats engine
+                "burst_count": burst_count,
+                "co_occurrence": [{"fault": co_fault, "count": co_count}] if co_fault else [],
+                "trend": trend
+            }
+
+            return FaultAnalysisV2Response(
+                analysis_version="v3.0",
+                dataset_hash=ds.dataset_hash,
+                row_id=request.row_id,
+                fault_code=fault_code,
+                device=device,
+                timestamp=ref_ts,
+                user_question=request.question,
+                confidence="LOW",
+                statistics=statistics,
+                evidence=synthetic_evidence,
+                diagnosis="STATISTICAL INCONSISTENCY DETECTED. The recorded burst constraints contradict hourly occurrences.",
+                primary_action="Investigate upstream telemetry collection agent for packet dropping.",
+                docs_used=0,
+                sources=[],
+                hallucinated_tags_removed=[],
+                validation_warnings=["Metric validation blocked LLM inference."],
+                llm_latency_ms=0.0,
+                rag_latency_ms=round(rag_ms, 1),
+                total_latency_ms=round(total_ms, 1),
+            )
+
         prompt = _build_prompt(
             row_id=request.row_id,
             fault_code=fault_code,
@@ -167,8 +236,11 @@ class FaultAnalysisOrchestrator:
             occ_1h=occ_1h,
             occ_24h=occ_24h,
             co_fault=co_fault,
+            co_count=co_count,
             burst_detected=burst,
             burst_desc=burst_desc,
+            burst_count=burst_count,
+            trend=trend,
             confidence=confidence,
             docs=rag_docs,
             user_question=request.question,
@@ -198,21 +270,18 @@ class FaultAnalysisOrchestrator:
         )
 
         return FaultAnalysisV2Response(
-            analysis_version="v2.0",
+            analysis_version="v3.0",
             dataset_hash=ds.dataset_hash,
             row_id=request.row_id,
             fault_code=fault_code,
             device=device,
             timestamp=ref_ts,
             user_question=request.question,
-            confidence=confidence,
+            confidence=cleaned.confidence or confidence,
             statistics=statistics,
-            summary=cleaned.summary,
-            likely_causes=cleaned.likely_causes,
-            diagnostic_steps=cleaned.diagnostic_steps,
-            preventive_actions=cleaned.preventive_actions,
-            related_plc_tags=cleaned.related_plc_tags,
-            confidence_explanation=cleaned.confidence_explanation,
+            evidence=cleaned.metrics,  # Maps clean nested v3 metrics structure
+            diagnosis=cleaned.diagnosis,
+            primary_action=cleaned.primary_action,
             docs_used=len(rag_docs),
             sources=rag_docs,
             hallucinated_tags_removed=hallucinated,
@@ -260,7 +329,7 @@ class FaultAnalysisOrchestrator:
 
 def _build_prompt(
     row_id, fault_code, device, ref_ts, severity, message,
-    occ_1h, occ_24h, co_fault, burst_detected, burst_desc,
+    occ_1h, occ_24h, co_fault, co_count, burst_detected, burst_desc, burst_count, trend,
     confidence, docs, user_question,
 ) -> str:
     doc_section = ""
@@ -287,18 +356,23 @@ FAULT DETAILS:
   Severity: {severity}
   Message: {message}
 
-STATISTICS (deterministic — do NOT recompute):
-  Occurrences last hour: {occ_1h}
-  Occurrences last 24 hours: {occ_24h}
-  Top co-occurring fault: {co_fault or "None"}
-  Burst detected: {"Yes — " + burst_desc if burst_desc else "No"}
+STATISTICS (deterministic — do NOT recompute, map exactly into JSON output):
+  Occurrences_1h: {occ_1h}
+  Occurrences_24h: {occ_24h}
+  Co_occurrence Fault: {co_fault or "None"}
+  Co_occurrence Count: {co_count}
+  Burst detected: {"true" if burst_detected else "false"}
+  Burst count: {burst_count}
+  Trend: {trend}
   Confidence level (determined externally): {confidence}{doc_section}{question_section}
 
 OUTPUT RULES:
   - Return ONLY valid JSON matching this exact schema (no prose outside JSON):
-  - Do NOT invent PLC tag names not present in documentation
-  - Do NOT invent document sections
-  - Confidence explanation must reference the statistics above
+  - 'diagnosis' must be a SINGLE high-impact string (max 3 lines). DO NOT use filler words or conversational phrasing ("it appears", "it may indicate").
+  - Map deterministic STATISTICS directly into the nested 'metrics' JSON object. Do not hallucinate values.
+  - 'primary_action' must be ONE concrete, technically targeted action. Do NOT give generic "inspect hardware" advice.
+  - Do NOT invent PLC tag names not present in documentation.
+  - Do NOT invent document sections.
 
 {_LLM_JSON_SCHEMA}
 """

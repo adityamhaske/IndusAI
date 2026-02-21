@@ -72,7 +72,17 @@ const TreeNode = ({ node, selectedFiles, selectedFolders, onToggleFile, onToggle
 export default function ProjectExplorer() {
     const [tree, setTree] = useState([]);
     const [loading, setLoading] = useState(true);
-    const [isOpen, setIsOpen] = useState(true);
+
+    const [isOpen, setIsOpen] = useState(() => {
+        // default collapsed on mobile
+        if (typeof window !== 'undefined' && window.innerWidth < 768) return false;
+        const saved = localStorage.getItem('explorerOpen');
+        return saved ? saved === 'true' : true;
+    });
+
+    useEffect(() => {
+        localStorage.setItem('explorerOpen', isOpen);
+    }, [isOpen]);
 
     const selectedFiles = useAppStore(s => s.selectedFiles);
     const selectedFolders = useAppStore(s => s.selectedFolders);
@@ -106,10 +116,10 @@ export default function ProjectExplorer() {
 
     if (!isOpen) {
         return (
-            <div className="w-12 bg-industrial-50 border-r border-industrial-200 flex flex-col items-center py-4">
+            <div className="w-12 bg-industrial-50 border-l border-industrial-200 flex flex-col items-center py-4 flex-shrink-0 transition-all duration-300">
                 <button
                     onClick={() => setIsOpen(true)}
-                    className="p-2 hover:bg-industrial-200 rounded text-industrial-500"
+                    className="p-2 hover:bg-industrial-200 rounded text-industrial-500 transition-colors"
                     title="Open Project Explorer"
                 >
                     <Filter className="w-5 h-5" />
@@ -119,7 +129,7 @@ export default function ProjectExplorer() {
     }
 
     return (
-        <div className="flex-shrink-0 w-[280px] bg-industrial-50 border-r border-industrial-200 flex flex-col h-full">
+        <div className="flex-shrink-0 w-[320px] bg-industrial-50 border-l border-industrial-200 flex flex-col h-full transition-all duration-300">
             <div className="p-4 border-b border-industrial-200 flex justify-between items-center bg-white">
                 <h2 className="font-semibold text-industrial-800 text-sm flex items-center gap-2">
                     <Filter className="w-4 h-4 text-primary-600" />
@@ -129,7 +139,7 @@ export default function ProjectExplorer() {
                     onClick={() => setIsOpen(false)}
                     className="text-industrial-400 hover:text-industrial-700 p-1"
                 >
-                    <ChevronDown className="w-4 h-4 block rotate-90" />
+                    <ChevronRight className="w-4 h-4 block" />
                 </button>
             </div>
 

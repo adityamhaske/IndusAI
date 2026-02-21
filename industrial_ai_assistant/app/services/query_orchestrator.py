@@ -37,6 +37,10 @@ from app.models.project_models import (
     StructuredHit,
     QueryType,
     SemanticChunk,
+    IntentType,
+    FaultAnalysisResponseModel,
+    FileExplanationResponseModel,
+    GeneralQueryResponseModel,
 )
 from app.services import query_classifier
 from app.services.project_context_manager import get_project_context_manager
@@ -147,6 +151,7 @@ class QueryOrchestrator:
                             )
                             semantic_hits = [ScoredChunk(chunk=chunk, score=1.0, retrieval_method="exact_file")]
                             is_fast_path = True
+                            intent.intent_type = IntentType.FILE_EXPLANATION.value
                             context_scope_meta["total_candidates"] = 1
                             context_scope_meta["used_chunks"] = 1
                             logger.info("[%s] Triggered File Explanation Fast-Path for %s", project_id, target_file)
@@ -198,6 +203,7 @@ class QueryOrchestrator:
             intent_labels=[l.value for l in intent.labels],
             structured_hits=structured_hits,
             semantic_chunks=semantic_hits,
+            intent_type=intent.intent_type,
         )
         context_scope_meta["truncated"] = is_truncated
         context_scope_meta["used_chunks"] = used_chunks
@@ -208,13 +214,40 @@ class QueryOrchestrator:
         llm_ms = (time.perf_counter() - t_llm) * 1000
 
         # ── Step 8: Parse + validate schema ──────────────────────────────────
-        parsed = _parse_llm_output(raw_response)
-        confidence = parsed["confidence"]
+        parsed_dict = _parse_llm_output(raw_response)
+        
+        # Pydantic validation
+        validated_model = None
+        try:
+            if intent.intent_type == IntentType.FAULT_ANALYSIS.value:
+                validated_model = FaultAnalysisResponseModel(**parsed_dict)
+            elif intent.intent_type == IntentType.FILE_EXPLANATION.value:
+                validated_model = FileExplanationResponseModel(**parsed_dict)
+            else:
+                validated_model = GeneralQueryResponseModel(**parsed_dict)
+        except Exception as validation_err:
+            logger.warning("[%s] LLM output validation failed for intent %s: %s", project_id, intent.intent_type, validation_err)
+            # Fallback to GENERAL_QUERY
+            fallback_dict = {
+                "explanation": parsed_dict.get("summary", "") or parsed_dict.get("explanation", raw_response),
+                "supporting_sources": parsed_dict.get("supporting_evidence", []),
+                "confidence": parsed_dict.get("confidence", "LOW")
+            }
+            validated_model = GeneralQueryResponseModel(**fallback_dict)
+            intent.intent_type = IntentType.GENERAL_QUERY.value
+            
+        confidence = validated_model.confidence
 
-        # ── Step 9: Hallucination guard (runs on summary + evidence) ─────────
+        # ── Step 9: Hallucination guard (runs on main text fields) ───────────
         known_tags = si.all_tag_names_lower()
-        # Combine text fields that may contain tag references
-        guard_text = parsed["summary"] + " " + " ".join(parsed["supporting_evidence"])
+        
+        if isinstance(validated_model, FaultAnalysisResponseModel):
+            guard_text = validated_model.summary + " " + " ".join(validated_model.supporting_evidence)
+        elif isinstance(validated_model, FileExplanationResponseModel):
+            guard_text = validated_model.summary + " " + validated_model.engineering_insight
+        else:
+            guard_text = validated_model.explanation + " " + " ".join(validated_model.supporting_sources)
+            
         hallucinated = _detect_hallucinated_tags(guard_text, known_tags)
 
         if hallucinated:
@@ -223,9 +256,10 @@ class QueryOrchestrator:
                 project_id, hallucinated,
             )
             for tag in hallucinated:
-                parsed["summary"] = re.sub(
-                    re.escape(tag), "[REDACTED]", parsed["summary"], flags=re.IGNORECASE
-                )
+                if isinstance(validated_model, FaultAnalysisResponseModel) or isinstance(validated_model, FileExplanationResponseModel):
+                    validated_model.summary = re.sub(re.escape(tag), "[REDACTED]", validated_model.summary, flags=re.IGNORECASE)
+                else:
+                    validated_model.explanation = re.sub(re.escape(tag), "[REDACTED]", validated_model.explanation, flags=re.IGNORECASE)
 
         total_ms = (time.perf_counter() - t_start) * 1000
         warnings: list[str] = []
@@ -233,21 +267,15 @@ class QueryOrchestrator:
             warnings.append(
                 f"LLM invented {len(hallucinated)} PLC tag(s) — they have been redacted."
             )
-        if not parsed.get("_raw_valid"):
+        if hasattr(parsed_dict, "get") and not parsed_dict.get("_raw_valid", True):
             warnings.append("LLM response was not valid JSON — used plain text fallback.")
 
-        # Store full structured response as JSON string in answer field
-        answer_json = json.dumps({
-            "summary":             parsed["summary"],
-            "root_causes":         parsed["root_causes"],
-            "recommended_actions": parsed["recommended_actions"],
-            "supporting_evidence": parsed["supporting_evidence"],
-            "limitations":         parsed["limitations"],
-        })
+        answer_json = validated_model.model_dump_json()
 
         return ProjectQueryResponse(
             question=request.question,
             project_id=project_id,
+            intent_type=intent.intent_type,
             query_intent=intent,
             structured_hits=structured_hits,
             semantic_sources=[sc.chunk.source_file for sc in semantic_hits],
@@ -258,6 +286,7 @@ class QueryOrchestrator:
             llm_latency_ms=round(llm_ms, 1),
             total_latency_ms=round(total_ms, 1),
             warnings=warnings,
+            context_scope=context_scope_meta,
         )
 
 
