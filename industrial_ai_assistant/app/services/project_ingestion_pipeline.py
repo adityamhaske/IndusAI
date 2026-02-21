@@ -157,6 +157,7 @@ class ProjectIngestionPipeline:
 
     def _ingest_l5x(self, path: Path, project_id: str, si, sem, result: IngestionResult):
         parsed = l5x_parser.parse(path)
+        logger.info("[Ingestion - %s] Parsed L5X '%s': %d tags, %d routines, %d AOIs", project_id, path.name, len(parsed.tags), len(parsed.routines), len(parsed.aois))
         result.warnings.extend(parsed.warnings)
 
         for tag in parsed.tags:
@@ -178,8 +179,11 @@ class ProjectIngestionPipeline:
         for aoi in parsed.aois:
             si.add_aoi(aoi)
 
+        logger.info("[Ingestion - %s] Completed L5X '%s'", project_id, path.name)
+
     def _ingest_excel(self, path: Path, project_id: str, si, sem, result: IngestionResult):
         parsed = excel_parser.parse(path)
+        logger.info("[Ingestion - %s] Parsed Excel '%s': %d IO rows", project_id, path.name, len(parsed.io_rows))
         result.warnings.extend(parsed.warnings)
 
         for io in parsed.io_rows:
@@ -193,6 +197,7 @@ class ProjectIngestionPipeline:
 
     def _ingest_pdf(self, path: Path, project_id: str, sem, result: IngestionResult):
         parsed = pdf_parser.parse(path)
+        logger.info("[Ingestion - %s] Parsed PDF '%s': %d raw chunks generated", project_id, path.name, len(parsed.chunks))
         result.warnings.extend(parsed.warnings)
         chunks = [
             _make_chunk(c.content, str(path), c.title, "pdf", project_id, page=c.page)
@@ -204,6 +209,7 @@ class ProjectIngestionPipeline:
 
     def _ingest_text(self, path: Path, project_id: str, sem, result: IngestionResult):
         parsed = text_parser.parse(path)
+        logger.info("[Ingestion - %s] Parsed Text '%s': %d raw chunks generated", project_id, path.name, len(parsed.chunks))
         result.warnings.extend(parsed.warnings)
         chunks = [
             _make_chunk(c.content, str(path), path.stem, "txt", project_id)

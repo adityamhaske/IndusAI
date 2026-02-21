@@ -21,18 +21,6 @@ const Sidebar = () => {
                 </div>
             </div>
 
-            {/* Project Info Placeholder */}
-            <div className="gx-6 p-4 m-4 bg-industrial-50 rounded-lg border border-industrial-200">
-                <div className="text-xs font-medium text-industrial-500 uppercase mb-1">Active Project</div>
-                <div className="font-semibold text-industrial-800 text-sm truncate">Commissioning V1</div>
-                <div className="flex items-center gap-2 mt-2">
-                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
-                        Indexed
-                    </span>
-                    <span className="text-xs text-industrial-400">v1.2</span>
-                </div>
-            </div>
-
             {/* Navigation */}
             <nav className="flex-1 px-4 space-y-1 overflow-y-auto py-2">
                 <div className="text-xs font-semibold text-industrial-400 px-2 py-2">MENU</div>

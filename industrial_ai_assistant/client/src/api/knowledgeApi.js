@@ -27,10 +27,15 @@ export async function queryKnowledge({
     }),
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: `HTTP ${res.status}` }));
-    throw Object.assign(new Error(err.message || 'Knowledge query failed'), { data: err });
+    const text = await res.text();
+    let errData = {};
+    try { errData = text ? JSON.parse(text) : {}; } catch { errData.message = text || `HTTP ${res.status}`; }
+    throw Object.assign(new Error(errData.message || 'Knowledge query failed'), { data: errData });
   }
-  return res.json();
+
+  const text = await res.text();
+  if (!text) throw new Error("Empty response from server");
+  return JSON.parse(text);
 }
 
 /**
@@ -39,8 +44,14 @@ export async function queryKnowledge({
  */
 export async function getProjectStatus(project_id = 'default') {
   const res = await fetch(`${BASE}/api/project/status?project_id=${encodeURIComponent(project_id)}`);
-  if (!res.ok) throw new Error(`Status check failed: ${res.status}`);
-  return res.json();
+  if (!res.ok) {
+    const text = await res.text();
+    let msg = `Status check failed: ${res.status}`;
+    try { const data = JSON.parse(text); msg = data.message || msg; } catch { msg = text || msg; }
+    throw new Error(msg);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
 }
 
 /**
@@ -55,10 +66,14 @@ export async function ingestProject({ folder_path, project_id = 'default' }) {
     body: JSON.stringify({ folder_path, project_id }),
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: `HTTP ${res.status}` }));
-    throw Object.assign(new Error(err.message || 'Ingestion failed'), { data: err });
+    const text = await res.text();
+    let errData = {};
+    try { errData = text ? JSON.parse(text) : {}; } catch { errData.message = text || `HTTP ${res.status}`; }
+    throw Object.assign(new Error(errData.message || 'Ingestion failed'), { data: errData });
   }
-  return res.json();
+  const text = await res.text();
+  if (!text) throw new Error("Empty response from server");
+  return JSON.parse(text);
 }
 
 /**
@@ -66,8 +81,12 @@ export async function ingestProject({ folder_path, project_id = 'default' }) {
  */
 export async function getProjectMetrics(project_id = 'default') {
   const res = await fetch(`${BASE}/api/project/metrics?project_id=${encodeURIComponent(project_id)}`);
-  if (!res.ok) throw new Error(`Metrics failed: ${res.status}`);
-  return res.json();
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Metrics failed: ${res.status}`);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
 }
 
 /**
@@ -76,8 +95,12 @@ export async function getProjectMetrics(project_id = 'default') {
  */
 export async function getProjectFiles(project_id = 'default') {
   const res = await fetch(`${BASE}/api/project/files?project_id=${encodeURIComponent(project_id)}`);
-  if (!res.ok) throw new Error(`Files failed: ${res.status}`);
-  return res.json();
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Files failed: ${res.status}`);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
 }
 
 /**
@@ -87,6 +110,10 @@ export async function resetProject(project_id = 'default') {
   const res = await fetch(`${BASE}/api/project/reset?project_id=${encodeURIComponent(project_id)}`, {
     method: 'DELETE',
   });
-  if (!res.ok) throw new Error(`Reset failed: ${res.status}`);
-  return res.json();
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Reset failed: ${res.status}`);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : { status: "cleared" };
 }

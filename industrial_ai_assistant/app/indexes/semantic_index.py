@@ -93,7 +93,7 @@ class SemanticIndex:
             self._bm25_add(project_id, chunk.chunk_id, chunk.content, chunk)
 
         client.upsert(collection_name=_QDRANT_COLLECTION, points=points)
-        logger.debug("Upserted %d chunks for project=%s", len(points), project_id)
+        logger.info("[Ingestion - %s] Upserted %d chunk embeddings into Qdrant", project_id, len(points))
         return len(points)
 
     # ── Vector search ──────────────────────────────────────────────────────────
