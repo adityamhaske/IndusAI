@@ -28,6 +28,10 @@ class OpenAIProvider(AIProvider):
     def provider_name(self) -> str:
         return "openai"
 
+    @property
+    def provider_type(self) -> str:
+        return "cloud"
+
     def generate(self, request: AIRequest) -> AIResponse:
         start_time = time.perf_counter()
         
@@ -44,6 +48,8 @@ class OpenAIProvider(AIProvider):
             "messages": messages,
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True}
         }
         
         if request.response_format == "json":
@@ -55,25 +61,50 @@ class OpenAIProvider(AIProvider):
         }
         
         timeout_seconds = request.timeout_ms / 1000.0
+        idle_timeout_seconds = 5.0
 
         try:
-            response = self._sync_client.post(
+            with self._sync_client.stream(
+                "POST",
                 "/v1/chat/completions",
                 json=payload,
                 headers=headers,
-                timeout=timeout_seconds
-            )
-            response.raise_for_status()
-            res_data = response.json()
-            
-            choices = res_data.get("choices", [])
-            if not choices:
-                return self._build_error_response("OpenAI returned an empty choices array.", "PARSE", start_time)
+                timeout=httpx.Timeout(connect=5.0, read=timeout_seconds, write=5.0, pool=5.0)
+            ) as response:
+                response.raise_for_status()
                 
-            raw_text = choices[0].get("message", {}).get("content", "")
-            usage = res_data.get("usage", {})
-            prompt_tokens = usage.get("prompt_tokens", 0)
-            completion_tokens = usage.get("completion_tokens", 0)
+                raw_text = ""
+                prompt_tokens = 0
+                completion_tokens = 0
+                last_token_timestamp = time.perf_counter()
+                first_token_received = False
+                
+                import json
+                for line in response.iter_lines():
+                    current_time = time.perf_counter()
+                    
+                    if first_token_received and (current_time - last_token_timestamp > idle_timeout_seconds):
+                        raise httpx.TimeoutException(f"Cloud model generation exceeded configured idle timeout ({idle_timeout_seconds}s stall).")
+                        
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            choices = chunk.get("choices", [])
+                            if choices:
+                                delta = choices[0].get("delta", {})
+                                if "content" in delta and delta["content"]:
+                                    raw_text += delta["content"]
+                                    first_token_received = True
+                                    last_token_timestamp = current_time
+                            
+                            if "usage" in chunk and chunk["usage"]:
+                                prompt_tokens = chunk["usage"].get("prompt_tokens", 0)
+                                completion_tokens = chunk["usage"].get("completion_tokens", 0)
+                        except json.JSONDecodeError:
+                            continue
             
             parsed_json = None
             if request.response_format == "json":
@@ -97,7 +128,7 @@ class OpenAIProvider(AIProvider):
             )
 
         except httpx.TimeoutException:
-            return self._build_error_response(f"OpenAI generation timed out after {timeout_seconds}s", "TIMEOUT", start_time)
+            return self._build_error_response("Cloud model generation exceeded configured idle timeout.", "TIMEOUT", start_time)
         except httpx.HTTPStatusError as e:
             return self._build_error_response(f"OpenAI HTTP error: {e.response.status_code} - {e.response.text[:100]}", "CONNECTION", start_time)
         except httpx.RequestError as e:

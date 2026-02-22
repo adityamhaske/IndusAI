@@ -28,6 +28,10 @@ class GeminiProvider(AIProvider):
     def provider_name(self) -> str:
         return "gemini"
 
+    @property
+    def provider_type(self) -> str:
+        return "cloud"
+
     def generate(self, request: AIRequest) -> AIResponse:
         start_time = time.perf_counter()
         
@@ -58,31 +62,54 @@ class GeminiProvider(AIProvider):
         }
         
         timeout_seconds = request.timeout_ms / 1000.0
+        idle_timeout_seconds = 5.0
 
         try:
-            url = f"/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-            response = self._sync_client.post(
+            url = f"/v1beta/models/{self.model}:streamGenerateContent?key={self.api_key}&alt=sse"
+            
+            with self._sync_client.stream(
+                "POST",
                 url,
                 json=payload,
                 headers=headers,
-                timeout=timeout_seconds
-            )
-            response.raise_for_status()
-            res_data = response.json()
-            
-            candidates = res_data.get("candidates", [])
-            if not candidates:
-                return self._build_error_response("Gemini returned an empty candidates array.", "PARSE", start_time, raw_output=str(res_data))
+                timeout=httpx.Timeout(connect=5.0, read=timeout_seconds, write=5.0, pool=5.0)
+            ) as response:
+                response.raise_for_status()
                 
-            raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            
-            usage = res_data.get("usageMetadata", {})
-            prompt_tokens = usage.get("promptTokenCount", 0)
-            completion_tokens = usage.get("candidatesTokenCount", 0)
+                raw_text = ""
+                prompt_tokens = 0
+                completion_tokens = 0
+                last_token_timestamp = time.perf_counter()
+                first_token_received = False
+                
+                import json
+                for line in response.iter_lines():
+                    current_time = time.perf_counter()
+                    
+                    if first_token_received and (current_time - last_token_timestamp > idle_timeout_seconds):
+                        raise httpx.TimeoutException(f"Cloud model generation exceeded configured idle timeout ({idle_timeout_seconds}s stall).")
+                        
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        try:
+                            chunk = json.loads(data_str)
+                            candidates = chunk.get("candidates", [])
+                            if candidates:
+                                parts = candidates[0].get("content", {}).get("parts", [])
+                                if parts and "text" in parts[0]:
+                                    raw_text += parts[0]["text"]
+                                    first_token_received = True
+                                    last_token_timestamp = current_time
+                                    
+                            usage = chunk.get("usageMetadata", {})
+                            if usage:
+                                prompt_tokens = usage.get("promptTokenCount", prompt_tokens)
+                                completion_tokens = usage.get("candidatesTokenCount", completion_tokens)
+                        except json.JSONDecodeError:
+                            continue
             
             parsed_json = None
             if request.response_format == "json":
-                import json
                 try:
                     parsed_json = json.loads(raw_text)
                 except json.JSONDecodeError as decode_err:
@@ -102,7 +129,7 @@ class GeminiProvider(AIProvider):
             )
 
         except httpx.TimeoutException:
-            return self._build_error_response(f"Gemini generation timed out after {timeout_seconds}s", "TIMEOUT", start_time)
+            return self._build_error_response("Cloud model generation exceeded configured idle timeout.", "TIMEOUT", start_time)
         except httpx.HTTPStatusError as e:
             return self._build_error_response(f"Gemini HTTP error: {e.response.status_code} - {e.response.text[:100]}", "CONNECTION", start_time)
         except httpx.RequestError as e:

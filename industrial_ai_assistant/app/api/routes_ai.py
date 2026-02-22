@@ -31,13 +31,21 @@ def get_ai_gateway_metrics():
         "# TYPE ai_gateway_status gauge",
         f"ai_gateway_status {1 if m.get('status') != 'NORMAL' else 0}",
         
-        "# HELP ai_gateway_p50_latency_ms P50 latency of successful AI requests",
-        "# TYPE ai_gateway_p50_latency_ms gauge",
-        f"ai_gateway_p50_latency_ms {m.get('p50_latency_ms', 0)}",
+        "# HELP ai_gateway_local_p50_latency_ms P50 latency of successful local AI requests",
+        "# TYPE ai_gateway_local_p50_latency_ms gauge",
+        f"ai_gateway_local_p50_latency_ms {m.get('local_p50_latency_ms', 0)}",
         
-        "# HELP ai_gateway_p95_latency_ms P95 latency of successful AI requests",
-        "# TYPE ai_gateway_p95_latency_ms gauge",
-        f"ai_gateway_p95_latency_ms {m.get('p95_latency_ms', 0)}",
+        "# HELP ai_gateway_local_p95_latency_ms P95 latency of successful local AI requests",
+        "# TYPE ai_gateway_local_p95_latency_ms gauge",
+        f"ai_gateway_local_p95_latency_ms {m.get('local_p95_latency_ms', 0)}",
+        
+        "# HELP ai_gateway_cloud_p50_latency_ms P50 latency of successful cloud AI requests",
+        "# TYPE ai_gateway_cloud_p50_latency_ms gauge",
+        f"ai_gateway_cloud_p50_latency_ms {m.get('cloud_p50_latency_ms', 0)}",
+        
+        "# HELP ai_gateway_cloud_p95_latency_ms P95 latency of successful cloud AI requests",
+        "# TYPE ai_gateway_cloud_p95_latency_ms gauge",
+        f"ai_gateway_cloud_p95_latency_ms {m.get('cloud_p95_latency_ms', 0)}",
         
         "# HELP ai_gateway_failure_rate_last_60s Sliding window failure rate",
         "# TYPE ai_gateway_failure_rate_last_60s gauge",

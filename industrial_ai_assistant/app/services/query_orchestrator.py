@@ -240,6 +240,22 @@ class QueryOrchestrator:
             
         confidence = validated_model.confidence
 
+        # ── AUDIT 1: Raw Output Audit ──
+        logger.info(
+            "PHASE13_AUDIT: raw_len=%d, parsed_len=%d, diagnosis_len=%d, "
+            "action_len=%d, tokens_prompt=%d, completion_len=%d, "
+            "retrieval_chunks=%d, coverage=%.2f, raw_valid=%s",
+            len(raw_response),
+            len(json.dumps(parsed_dict)),
+            len(parsed_dict.get("summary", parsed_dict.get("explanation", ""))),
+            len(str(parsed_dict.get("recommended_actions", ""))),
+            prompt_len // 4,
+            len(raw_response) // 4,
+            len(semantic_hits) + len(structured_hits),
+            retrieval_coverage_score,
+            parsed_dict.get("_raw_valid", False)
+        )
+
         # ── Step 9: Hallucination guard (runs on main text fields) ───────────
         known_tags = si.all_tag_names_lower()
         

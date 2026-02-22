@@ -22,8 +22,9 @@ export const HistoryPage = () => (
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
     FolderOpen, RefreshCw, Trash2, CheckCircle2, AlertTriangle,
-    Loader2, Database, FileText, Cpu, Hash, Upload, FolderSearch, File, Frown
+    Loader2, Database, FileText, Cpu, Hash, Upload, FolderSearch, File, Frown, Save
 } from 'lucide-react';
+import systemApi from '../services/systemApi';
 import { getProjectStatus, resetProject, getProjectFiles } from '../services/knowledgeApi';
 import { projectApi } from '../services/projectApi';
 
@@ -399,21 +400,195 @@ export const ProjectPage = () => {
 
 
 // ── Settings Page ──────────────────────────────────────────────────────────────
-export const SettingsPage = () => (
-    <div className="p-8">
-        <h2 className="text-2xl font-bold text-industrial-800 mb-4">System Settings</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="bg-white p-6 rounded-xl border border-industrial-200 shadow-sm">
-                <h3 className="text-sm font-bold text-industrial-800 mb-2 flex items-center gap-2"><Cpu className="w-4 h-4 text-blue-500" /> Language Model Engine</h3>
-                <p className="text-sm text-industrial-500 mb-1">Provider: <strong>Ollama Native</strong></p>
-                <p className="text-sm text-industrial-500">Current Base: <strong>mistral</strong></p>
-            </div>
-            <div className="bg-white p-6 rounded-xl border border-industrial-200 shadow-sm">
-                <h3 className="text-sm font-bold text-industrial-800 mb-2 flex items-center gap-2"><Database className="w-4 h-4 text-rose-500" /> Vector Database</h3>
-                <p className="text-sm text-industrial-500 mb-1">Provider: <strong>Qdrant Local</strong></p>
-                <p className="text-sm text-industrial-500">Endpoint: <strong>localhost:6333</strong></p>
+export const SettingsPage = () => {
+    const [config, setConfig] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState(null);
+    const [success, setSuccess] = useState(false);
+
+    // Form state
+    const [primary, setPrimary] = useState('local_ollama');
+    const [secondary, setSecondary] = useState('none');
+    const [cfgTimeout, setCfgTimeout] = useState(8000);
+    const [speculative, setSpeculative] = useState(true);
+    const [openaiKey, setOpenaiKey] = useState('');
+    const [geminiKey, setGeminiKey] = useState('');
+
+    useEffect(() => {
+        let isMounted = true;
+        systemApi.getConfig().then(data => {
+            if (!isMounted) return;
+            setConfig(data);
+            setPrimary(data.primary_provider || 'local_ollama');
+            setSecondary(data.secondary_provider || 'none');
+            setCfgTimeout(data.timeout_ms || 8000);
+            setSpeculative(data.speculative_fallback ?? true);
+            setOpenaiKey(data.providers?.openai?.enabled ? '********' : '');
+            setGeminiKey(data.providers?.gemini?.enabled ? '********' : '');
+            setLoading(false);
+        }).catch(e => {
+            if (!isMounted) return;
+            setError('Failed to load configuration.');
+            setLoading(false);
+        });
+        return () => { isMounted = false; };
+    }, []);
+
+    const handleSave = async () => {
+        setError(null);
+        setSuccess(false);
+        setSaving(true);
+        try {
+            const payload = {
+                primary_provider: primary,
+                secondary_provider: secondary,
+                timeout_ms: parseInt(cfgTimeout, 10),
+                max_tokens: 2000,
+                speculative_fallback: speculative,
+                openai_api_key: openaiKey === '********' ? null : openaiKey,
+                gemini_api_key: geminiKey === '********' ? null : geminiKey,
+            };
+            await systemApi.updateConfig(payload);
+            setSuccess(true);
+            setTimeout(() => setSuccess(false), 3000);
+        } catch (e) {
+            setError(e.message || 'Failed to save configuration');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    if (loading) {
+        return <div className="p-8 flex items-center gap-3 text-industrial-500"><Loader2 className="w-5 h-5 animate-spin" /> Loading configuration...</div>;
+    }
+
+    const needsOpenAI = primary === 'openai' || secondary === 'openai';
+    const needsGemini = primary === 'gemini' || secondary === 'gemini';
+    const disableSave = (needsOpenAI && !openaiKey) || (needsGemini && !geminiKey);
+
+    return (
+        <div className="p-8 max-w-4xl">
+            <h2 className="text-2xl font-bold text-industrial-800 mb-6">System Settings</h2>
+
+            <div className="space-y-6">
+                {/* AI Provider Section */}
+                <div className="bg-white p-6 rounded-xl border border-industrial-200 shadow-sm space-y-5">
+                    <h3 className="text-lg font-bold text-industrial-800 border-b border-industrial-100 pb-3 flex items-center gap-2">
+                        <Cpu className="w-5 h-5 text-primary-600" /> AI Provider Configuration
+                    </h3>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="space-y-2">
+                            <label className="text-xs font-semibold text-industrial-600 uppercase">Primary Provider</label>
+                            <select
+                                value={primary}
+                                onChange={e => setPrimary(e.target.value)}
+                                className="w-full border border-industrial-200 rounded-lg px-3 py-2 text-sm text-industrial-800 focus:outline-none focus:border-primary-400"
+                            >
+                                <option value="local_ollama">Local (Ollama)</option>
+                                <option value="openai">Cloud (OpenAI / GPT-4o)</option>
+                                <option value="gemini">Cloud (Google Gemini)</option>
+                            </select>
+                        </div>
+
+                        <div className="space-y-2">
+                            <label className="text-xs font-semibold text-industrial-600 uppercase">Secondary Fallback</label>
+                            <select
+                                value={secondary}
+                                onChange={e => setSecondary(e.target.value)}
+                                disabled={!speculative}
+                                className="w-full border border-industrial-200 rounded-lg px-3 py-2 text-sm text-industrial-800 focus:outline-none focus:border-primary-400 disabled:opacity-50 disabled:bg-industrial-50"
+                            >
+                                <option value="none">None</option>
+                                <option value="openai">Cloud (OpenAI / GPT-4o)</option>
+                                <option value="gemini">Cloud (Google Gemini)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
+                        <div className="space-y-2">
+                            <label className="text-xs font-semibold text-industrial-600 uppercase">Cloud SLA Timeout (ms)</label>
+                            <input
+                                type="number"
+                                value={cfgTimeout}
+                                onChange={e => setCfgTimeout(e.target.value)}
+                                className="w-full border border-industrial-200 rounded-lg px-3 py-2 text-sm text-industrial-800 focus:outline-none focus:border-primary-400"
+                            />
+                            <p className="text-xs text-industrial-400">Local TTFT is dynamically bounded (min 20s).</p>
+                        </div>
+
+                        <div className="flex items-center gap-3 pt-6">
+                            <input
+                                type="checkbox"
+                                id="speculative"
+                                checked={speculative}
+                                onChange={e => setSpeculative(e.target.checked)}
+                                className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500 cursor-pointer"
+                            />
+                            <div className="flex flex-col">
+                                <label htmlFor="speculative" className="text-sm font-bold text-industrial-700 cursor-pointer">
+                                    Enable Speculative Racing Engine
+                                </label>
+                                <p className="text-xs text-industrial-400">Fires fallback provider proactively if primary lags.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* API Keys */}
+                    <div className="space-y-4 pt-4 border-t border-industrial-100">
+                        <h4 className="text-sm font-bold text-industrial-700">Cloud Credentials</h4>
+                        <div className="space-y-3">
+                            <div>
+                                <label className="text-xs font-medium text-industrial-600 mb-1 flex items-center justify-between">
+                                    OpenAI API Key
+                                    {(needsOpenAI && !openaiKey) && <span className="text-red-500 font-bold">* REQUIRED *</span>}
+                                </label>
+                                <input
+                                    type="password"
+                                    value={openaiKey}
+                                    onChange={e => setOpenaiKey(e.target.value)}
+                                    placeholder="sk-..."
+                                    className="w-full border border-industrial-200 rounded-lg px-3 py-2 text-sm text-industrial-800 focus:outline-none focus:border-primary-400 font-mono"
+                                />
+                            </div>
+                            <div>
+                                <label className="text-xs font-medium text-industrial-600 mb-1 flex items-center justify-between">
+                                    Google Gemini API Key
+                                    {(needsGemini && !geminiKey) && <span className="text-red-500 font-bold">* REQUIRED *</span>}
+                                </label>
+                                <input
+                                    type="password"
+                                    value={geminiKey}
+                                    onChange={e => setGeminiKey(e.target.value)}
+                                    placeholder="AIzaSy..."
+                                    className="w-full border border-industrial-200 rounded-lg px-3 py-2 text-sm text-industrial-800 focus:outline-none focus:border-primary-400 font-mono"
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="pt-4 flex items-center gap-4">
+                        <button
+                            onClick={handleSave}
+                            disabled={saving || disableSave}
+                            className="bg-primary-600 text-white px-5 py-2.5 rounded-lg text-sm font-bold hover:bg-primary-700 disabled:opacity-50 transition-colors flex items-center gap-2"
+                        >
+                            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                            Save Configuration
+                        </button>
+                        {success && <span className="text-sm font-bold text-green-600 flex items-center gap-1.5"><CheckCircle2 className="w-4 h-4" /> Settings deployed live.</span>}
+                        {error && <span className="text-sm font-bold text-red-600 flex items-center gap-1.5"><AlertTriangle className="w-4 h-4" /> {error}</span>}
+                    </div>
+                </div>
+
+                <div className="bg-white p-6 rounded-xl border border-industrial-200 shadow-sm">
+                    <h3 className="text-sm font-bold text-industrial-800 mb-2 flex items-center gap-2"><Database className="w-4 h-4 text-rose-500" /> Vector Database</h3>
+                    <p className="text-sm text-industrial-500 mb-1">Provider: <strong>Qdrant Native Engine</strong></p>
+                    <p className="text-sm text-industrial-500">Endpoint: <strong>localhost:6333</strong></p>
+                </div>
             </div>
         </div>
-        <p className="text-xs text-industrial-400 mt-6">Project-specific index configurations have been securely migrated to the Project Information tab.</p>
-    </div>
-);
+    );
+};

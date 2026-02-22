@@ -13,6 +13,12 @@ class AIProvider(ABC):
         """Name of the provider (e.g., 'local_ollama', 'openai', 'gemini')"""
         pass
 
+    @property
+    @abstractmethod
+    def provider_type(self) -> str:
+        """Type of the provider: 'local' or 'cloud'"""
+        pass
+
     @abstractmethod
     def generate(self, request: AIRequest) -> AIResponse:
         """

@@ -197,10 +197,13 @@ class AIGatewayService:
     ):
         cost_usd = self._calculate_cost(response.model_name, response.prompt_tokens, response.completion_tokens)
         self._add_cost(cost_usd)
-        
+        provider_obj = self.providers.get(response.provider_name)
+        provider_type_str = provider_obj.provider_type if provider_obj else "unknown"
+
         trace = {
             "timestamp": datetime.utcnow().isoformat(),
             "provider_attempted": response.provider_name,
+            "provider_type": provider_type_str,
             "model": response.model_name,
             "prompt_tokens": response.prompt_tokens,
             "completion_tokens": response.completion_tokens,
@@ -258,6 +261,15 @@ class AIGatewayService:
                 error=f"Provider '{provider_id}' is not configured in Gateway.",
                 error_type="UNKNOWN"
             )
+            
+        # 1. Provider-Aware Timeout Policy
+        if provider.provider_type == "local":
+            estimated_prompt_tokens = len(request.prompt) // 4
+            # Heuristic: 120s minimum or 8ms per prompt token parsing allowance
+            request.timeout_ms = max(120000, estimated_prompt_tokens * 8)
+        else:
+            # Cloud retains strict configured SLA limits
+            request.timeout_ms = self.policy.timeout_ms if self.policy.timeout_ms else 8000
             
         try:
             res = provider.generate(request)
@@ -352,10 +364,6 @@ class AIGatewayService:
             
             # Zero-Chunk RAG Interception
             self._handle_zero_chunk_rag(request, retrieval_coverage_score)
-            
-            # Dynamic override of timeout based on policy
-            if self.policy.timeout_ms:
-                request.timeout_ms = self.policy.timeout_ms
 
             chain_depth = 0
             primary_id = self.policy.primary
@@ -391,9 +399,14 @@ class AIGatewayService:
                 self.half_open_probe_active = True
 
             # 3. Attempt Primary (Or Speculative)
-            if self.enable_speculative_fallback and self.policy.secondary and self.circuit_state != CircuitState.OPEN and not self.half_open_probe_active:
-                response, chain_depth = self._invoke_speculative(primary_id, self.policy.secondary, request)
-                self._record_result(not response.success and response.provider_name == primary_id)
+            if self.enable_speculative_fallback and self.circuit_state != CircuitState.OPEN and not self.half_open_probe_active:
+                if not self.policy.secondary or self.policy.secondary == "none":
+                    logger.info("AIGateway: Speculative execution disabled (no_secondary_provider configured).")
+                    response = self._invoke_provider(primary_id, request)
+                    self._record_result(not response.success)
+                else:
+                    response, chain_depth = self._invoke_speculative(primary_id, self.policy.secondary, request)
+                    self._record_result(not response.success and response.provider_name == primary_id)
             else:
                 response = self._invoke_provider(primary_id, request)
                 self._record_result(not response.success)
@@ -492,9 +505,17 @@ class AIGatewayService:
         if total_traces == 0:
             return {"status": SystemStatus.NORMAL.value, "traces_recorded": 0}
             
-        latencies = sorted([t["total_latency_ms"] for t in self.last_traces if t.get("success")])
-        p50 = latencies[int(len(latencies) * 0.5)] if latencies else 0.0
-        p95 = latencies[int(len(latencies) * 0.95)] if latencies else 0.0
+        local_traces = [t for t in self.last_traces if t.get("success") and t.get("provider_type") == "local"]
+        cloud_traces = [t for t in self.last_traces if t.get("success") and t.get("provider_type") == "cloud"]
+        
+        local_latencies = sorted([t["total_latency_ms"] for t in local_traces])
+        cloud_latencies = sorted([t["total_latency_ms"] for t in cloud_traces])
+        
+        local_p50 = local_latencies[int(len(local_latencies) * 0.5)] if local_latencies else 0.0
+        local_p95 = local_latencies[int(len(local_latencies) * 0.95)] if local_latencies else 0.0
+        
+        cloud_p50 = cloud_latencies[int(len(cloud_latencies) * 0.5)] if cloud_latencies else 0.0
+        cloud_p95 = cloud_latencies[int(len(cloud_latencies) * 0.95)] if cloud_latencies else 0.0
         
         fallbacks = sum(1 for t in self.last_traces if t.get("fallback_triggered"))
         fallback_ratio = fallbacks / total_traces
@@ -527,8 +548,10 @@ class AIGatewayService:
         return {
             "status": system_status.value,
             "circuit_state": self.circuit_state.value,
-            "p50_latency_ms": round(p50, 1),
-            "p95_latency_ms": round(p95, 1),
+            "local_p50_latency_ms": round(local_p50, 1),
+            "local_p95_latency_ms": round(local_p95, 1),
+            "cloud_p50_latency_ms": round(cloud_p50, 1),
+            "cloud_p95_latency_ms": round(cloud_p95, 1),
             "failure_rate_last_60s": round(failure_rate_60s, 3),
             "fallback_ratio": round(fallback_ratio, 3),
             "schema_failure_rate": round(schema_failure_rate, 3),

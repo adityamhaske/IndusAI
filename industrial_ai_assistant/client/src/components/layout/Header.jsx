@@ -42,6 +42,24 @@ const Header = ({ title }) => {
     const qdrantOk = health?.vector_store_connected;
     const loaded = knowledgeStatus?.project_loaded;
 
+    const getActiveMode = (h) => {
+        if (!h || !h.primary_provider) return null;
+        if (h.primary_provider.includes('local') && (!h.secondary_provider || h.secondary_provider === 'none')) {
+            return 'LOCAL_ONLY';
+        }
+        if (h.primary_provider.includes('local') && h.secondary_provider) {
+            return 'HYBRID';
+        }
+        return 'CLOUD_PRIMARY';
+    };
+
+    const mode = getActiveMode(health);
+    const modeColors = {
+        LOCAL_ONLY: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+        HYBRID: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+        CLOUD_PRIMARY: 'bg-sky-50 text-sky-700 border-sky-200'
+    };
+
     return (
         <header className="h-14 bg-white border-b border-industrial-200 flex items-center justify-between px-6 shadow-sm z-10 flex-shrink-0">
             {/* Left */}
@@ -57,6 +75,13 @@ const Header = ({ title }) => {
 
             {/* Right */}
             <div className="flex items-center gap-3 flex-shrink-0">
+                {mode && (
+                    <div className={`hidden lg:flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border font-bold flex-shrink-0 ${modeColors[mode]}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${mode === 'LOCAL_ONLY' ? 'bg-indigo-500' : mode === 'HYBRID' ? 'bg-emerald-500' : 'bg-sky-500'}`} />
+                        {mode.replace('_', ' ')}
+                    </div>
+                )}
+
                 <div className={`hidden md:flex items-center gap-1.5 text-xs ${llmOk ? 'text-industrial-600' : 'text-red-500'}`}>
                     <span className={`w-1.5 h-1.5 rounded-full ${llmOk ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />
                     <Cpu className="w-3 h-3" />

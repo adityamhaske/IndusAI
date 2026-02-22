@@ -118,13 +118,14 @@ class SemanticIndex:
         if scope_files is not None:
             must.append(FieldCondition(key="source_file", match=MatchAny(any=list(scope_files))))
 
-        hits = client.search(
+        response = client.query_points(
             collection_name=_QDRANT_COLLECTION,
-            query_vector=q_emb,
+            query=q_emb,
             query_filter=Filter(must=must),
             limit=top_k,
             with_payload=True,
         )
+        hits = response.points if hasattr(response, "points") else response
         return [_hit_to_scored(h, "vector") for h in hits]
 
     # ── BM25 keyword search ────────────────────────────────────────────────────
