@@ -6,6 +6,7 @@
  * Clears only when resetAll() is explicitly called.
  */
 import { create } from 'zustand';
+import { projectApi } from '../services/projectApi';
 import { persist, createJSONStorage } from 'zustand/middleware';
 
 const STORE_KEY = 'indusai_app_state_v1';
@@ -75,7 +76,7 @@ const useAppStore = create(
             async resetAll() {
                 // Reset backend project index
                 try {
-                    await fetch('/api/project/reset?project_id=default', { method: 'DELETE' });
+                    await projectApi.resetProject('default');
                 } catch { /* ignore */ }
                 // Clear frontend state
                 set({

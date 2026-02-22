@@ -179,21 +179,22 @@ def test_ingestion_result_metrics():
     assert r.tags_indexed == 10
 
 
-@pytest.mark.asyncio
-async def test_concurrency_lock_raises():
+def test_concurrency_lock_raises():
     """Triggering ingestion twice raises IngestionLockError."""
     import asyncio
     from app.core.project_exceptions import IngestionLockError
-    from app.services.project_ingestion_pipeline import _locks, _lock_registry_lock
+    from app.services.project_ingestion_pipeline import _locks, _lock_registry_lock, get_ingestion_pipeline
 
-    pid = "lock_test_proj"
-    async with _lock_registry_lock:
-        _locks[pid] = asyncio.Lock()
-    await _locks[pid].acquire()   # simulate in-progress ingestion
+    async def _run_test():
+        pid = "lock_test_proj"
+        async with _lock_registry_lock:
+            _locks[pid] = asyncio.Lock()
+        await _locks[pid].acquire()   # simulate in-progress ingestion
 
-    from app.services.project_ingestion_pipeline import get_ingestion_pipeline
-    pipeline = get_ingestion_pipeline()
-    with pytest.raises(IngestionLockError):
-        await pipeline.ingest("/tmp", pid)
+        pipeline = get_ingestion_pipeline()
+        with pytest.raises(IngestionLockError):
+            await pipeline.ingest("/tmp", pid)
 
-    _locks[pid].release()
+        _locks[pid].release()
+
+    asyncio.run(_run_test())

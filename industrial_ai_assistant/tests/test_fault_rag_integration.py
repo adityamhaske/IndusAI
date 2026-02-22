@@ -10,6 +10,7 @@ from app.services.rag_service import RAGService
 from app.services.fault_response_validator import FaultResponseValidator
 from app.services.fault_service import FaultService
 from app.models.fault_analysis_models import FaultAnalysisRequest, StructuredLLMOutput, RetrievedDoc
+from app.models.ai_models import AIResponse
 from app.core.schemas import DocumentChunk, ChunkMetadata
 
 SEED = 42
@@ -22,7 +23,7 @@ def _make_loaded_service(n=100) -> FaultService:
     df = pd.DataFrame({
         "row_id": list(range(n)),
         "fault_code": [f"E{i % 3:03d}" for i in range(n)],
-        "timestamp": pd.date_range("2024-01-01", periods=n, freq="5min", tz="UTC"),
+        "timestamp": pd.date_range("2024-01-01", periods=n, freq="1min", tz="UTC"),
         "device": ["PLC-A"] * n,
         "message": ["Test msg"] * n,
         "severity": ["LOW"] * n,
@@ -32,38 +33,60 @@ def _make_loaded_service(n=100) -> FaultService:
 
 
 class _GoodMockLLM:
-    def generate(self, prompt):
-        return json.dumps({
-            "summary": "Fault caused by sensor mismatch during pallet lift cycle.",
-            "likely_causes": ["Sensor threshold mismatch", "Timing issue in PLC rung"],
-            "diagnostic_steps": ["Check sensor status in I/O monitor", "Review timing rung sequence"],
-            "preventive_actions": ["Calibrate sensor annually", "Add hysteresis to threshold"],
-            "related_plc_tags": [],
-            "confidence_explanation": "MEDIUM confidence — moderate occurrence frequency.",
-        })
+    def execute(self, req, **kw):
+        payload = {
+            "diagnosis": "Fault caused by sensor mismatch during pallet lift cycle.",
+            "metrics": {
+                "likely_causes": ["Sensor threshold mismatch", "Timing issue in PLC rung"],
+                "diagnostic_steps": ["Check sensor status in I/O monitor", "Review timing rung sequence"],
+                "preventive_actions": ["Calibrate sensor annually", "Add hysteresis to threshold"],
+                "related_plc_tags": []
+            },
+            "primary_action": "Recalibrate the lift sensor and update the rung logic hysteresis.",
+            "confidence": "MEDIUM"
+        }
+        return AIResponse(
+            raw_output=json.dumps(payload),
+            parsed_output=payload,
+            success=True,
+            model_name="mock",
+            provider_name="mock"
+        )
 
 
 class _BadMockLLM:
     """Returns unparseable garbage."""
-    def generate(self, prompt): return "This is plain text, not JSON at all!!!"
+    def execute(self, req, **kw): 
+        return AIResponse(raw_output="plain text", success=True, parsed_output=None, model_name="m", provider_name="m")
 
 
 class _TimeoutMockLLM:
-    """Raises on generate — simulates timeout."""
-    def generate(self, prompt): raise RuntimeError("LLM connection timeout")
+    """Returns AIResponse with success=False — simulates timeout."""
+    def execute(self, req, **kw): 
+        return AIResponse(raw_output="", success=False, error="LLM connection timeout", parsed_output=None, model_name="mock", provider_name="mock")
 
 
 class _HallucinationLLM:
     """Returns valid JSON but with invented PLC tags."""
-    def generate(self, prompt):
-        return json.dumps({
-            "summary": "Fault analysis",
-            "likely_causes": ["Tag mismatch"],
-            "diagnostic_steps": ["Check"],
-            "preventive_actions": [],
-            "related_plc_tags": ["FAKE_TAG_XYZ", "INVENTED_DB99_VAR"],
-            "confidence_explanation": "HIGH",
-        })
+    def execute(self, req, **kw):
+        payload = {
+            "diagnosis": "Fault analysis hallucination test",
+            "metrics": {
+                "likely_causes": ["Tag mismatch"],
+                "diagnostic_steps": ["Check"],
+                "preventive_actions": [],
+                "related_plc_tags": ["FAKE_TAG_XYZ", "INVENTED_DB99_VAR"]
+            },
+            "primary_action": "Check the invented tags",
+            "confidence": "HIGH"
+        }
+        return AIResponse(
+            raw_output=json.dumps(payload),
+            parsed_output=payload,
+            success=True,
+            model_name="mock",
+            provider_name="mock"
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -106,14 +129,14 @@ def test_prompt_includes_stats():
         row_id=0, fault_code="E001", device="PLC-A",
         ref_ts=datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc),
         severity="HIGH", message="Test msg",
-        occ_1h=5, occ_24h=30, co_fault="E002",
-        burst_detected=True, burst_desc="5 faults in 10 min",
-        confidence="MEDIUM", docs=[], user_question=None,
+        occ_1h=5, occ_24h=30, co_fault="E002", co_count=1,
+        burst_detected=True, burst_desc="5 faults in 10 min", burst_count=5,
+        trend="STABLE", confidence="MEDIUM", docs=[], user_question=None,
     )
-    assert "Occurrences last hour: 5" in prompt
-    assert "Occurrences last 24 hours: 30" in prompt
-    assert "Burst detected: Yes" in prompt
-    assert "co-occurring fault: E002" in prompt
+    assert "Occurrences_1h: 5" in prompt
+    assert "Occurrences_24h: 30" in prompt
+    assert "Burst detected: true" in prompt
+    assert "Co_occurrence Fault: E002" in prompt
     assert "deterministic" in prompt.lower()
 
 
@@ -127,11 +150,11 @@ def test_llm_output_parsed():
         validator=FaultResponseValidator(),
         fault_service=svc,
     )
-    result = orch.analyze_fault(FaultAnalysisRequest(row_id=0, project_id="default"))
-    assert result.analysis_version == "v2.0"
-    assert "sensor" in result.summary.lower()
-    assert len(result.likely_causes) >= 1
-    assert len(result.diagnostic_steps) >= 1
+    result = orch.analyze_fault(FaultAnalysisRequest(row_id=99, project_id="default"))
+    assert result.analysis_version == "v3.0"
+    assert "sensor" in result.diagnosis.lower()
+    assert len(result.evidence.get("likely_causes", [])) >= 1
+    assert len(result.evidence.get("diagnostic_steps", [])) >= 1
 
 
 # ── Test 4: Hallucinated tag rejected ────────────────────────────────────────
@@ -150,9 +173,8 @@ def test_hallucinated_tags_removed():
         validator=ValidatorWithKnownTags(),
         fault_service=svc,
     )
-    result = orch.analyze_fault(FaultAnalysisRequest(row_id=0, project_id="default"))
-    for tag in result.related_plc_tags:
-        assert tag in known_tags, f"Hallucinated tag not removed: {tag}"
+    result = orch.analyze_fault(FaultAnalysisRequest(row_id=99, project_id="default"))
+    # Get tags directly since they are now processed in hallucinated_tags_removed but there's no result.related_plc_tags array natively exposed top-level in v3
     assert len(result.hallucinated_tags_removed) == 2  # FAKE_TAG_XYZ, INVENTED_DB99_VAR
 
 
@@ -166,9 +188,9 @@ def test_custom_question_in_prompt():
         row_id=4, fault_code="INF_120", device="CONVEYOR-03",
         ref_ts=datetime(2024, 1, 1, tzinfo=timezone.utc),
         severity="LOW", message="Cycle Complete",
-        occ_1h=2, occ_24h=18, co_fault="INF_110",
-        burst_detected=False, burst_desc="",
-        confidence="MEDIUM", docs=[], user_question=question,
+        occ_1h=2, occ_24h=18, co_fault="INF_110", co_count=0,
+        burst_detected=False, burst_desc="", burst_count=0,
+        trend="STABLE", confidence="MEDIUM", docs=[], user_question=question,
     )
     assert "USER QUESTION" in prompt
     assert question in prompt
@@ -198,14 +220,9 @@ def test_llm_timeout_uses_fallback():
         health_service=_AlwaysOkHealth(),
     )
 
-    with pytest.raises(Exception) as exc_info:
-        orch.analyze_fault(FaultAnalysisRequest(row_id=0, project_id="default"))
-
-    # Must raise LLMResponseParseError, not silently return mock data
-    from app.core.llm_exceptions import LLMResponseParseError
-    assert isinstance(exc_info.value, LLMResponseParseError), (
-        f"Expected LLMResponseParseError, got {type(exc_info.value).__name__}: {exc_info.value}"
-    )
+    result = orch.analyze_fault(FaultAnalysisRequest(row_id=99, project_id="default"))
+    assert "[STRUCTURED PARSE FAILED" in result.diagnosis
+    assert result.confidence == "LOW"
 
 
 # ── Test 7: RAG empty → still gets stats-only response ───────────────────────
@@ -221,9 +238,9 @@ def test_empty_rag_still_returns_result():
         validator=FaultResponseValidator(),
         fault_service=svc,
     )
-    result = orch.analyze_fault(FaultAnalysisRequest(row_id=0, project_id="default"))
+    result = orch.analyze_fault(FaultAnalysisRequest(row_id=99, project_id="default"))
     assert result.docs_used == 0
-    assert result.summary  # must still have a summary
+    assert result.diagnosis  # must still have a diagnosis
 
 
 # ── Test 8: Determinism — confidence not in LLM response ─────────────────────
@@ -236,8 +253,8 @@ def test_confidence_computed_deterministically():
         validator=FaultResponseValidator(),
         fault_service=svc,
     )
-    r1 = orch.analyze_fault(FaultAnalysisRequest(row_id=0, project_id="default"))
-    r2 = orch.analyze_fault(FaultAnalysisRequest(row_id=0, project_id="default"))
+    r1 = orch.analyze_fault(FaultAnalysisRequest(row_id=99, project_id="default"))
+    r2 = orch.analyze_fault(FaultAnalysisRequest(row_id=99, project_id="default"))
     assert r1.confidence == r2.confidence   # Always deterministic
 
 
@@ -251,6 +268,6 @@ def test_response_includes_sources():
         validator=FaultResponseValidator(),
         fault_service=svc,
     )
-    result = orch.analyze_fault(FaultAnalysisRequest(row_id=0, project_id="default"))
+    result = orch.analyze_fault(FaultAnalysisRequest(row_id=99, project_id="default"))
     assert result.docs_used == 2
     assert any("encoder" in s.source_file for s in result.sources)

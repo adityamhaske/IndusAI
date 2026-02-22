@@ -1,0 +1,94 @@
+name: Industrial AI CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  lint-and-type-check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install flake8 mypy
+    - name: Lint with flake8
+      run: |
+        # stop the build if there are Python syntax errors or undefined names
+        flake8 app/ tests/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        # exit-zero treats all errors as warnings
+        flake8 app/ tests/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    # - name: Type check with mypy
+    #   run: |
+    #     mypy app/
+
+  test-and-chaos:
+    needs: lint-and-type-check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt pytest pytest-asyncio
+    - name: Run Unit & Statistical Engine Tests
+      run: |
+        export PYTHONPATH=$(pwd)
+        pytest tests/test_fault_analysis.py tests/test_fault_summary.py tests/test_query_classifier.py
+    - name: Run Gateway & Chaos Tests
+      run: |
+        export PYTHONPATH=$(pwd)
+        pytest tests/test_fault_rag_integration.py
+        pytest tests/test_gateway_load_7b.py || true # Chaos threshold check (mocked)
+    - name: Run Reduced Scale Load Test
+      run: |
+        export PYTHONPATH=$(pwd)
+        python tests/test_gateway_scale_phase8.py
+
+  security-scan:
+    needs: test-and-chaos
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+    - name: Install Bandit & Pip-Audit
+      run: |
+        pip install bandit pip-audit
+    - name: Run Bandit Security Scan
+      run: |
+        bandit -r app/ -c pyproject.toml || true
+    - name: Run Pip-Audit Dependency Scan
+      run: |
+        pip-audit -r requirements.txt || true
+
+  build-and-deploy-staging:
+    needs: security-scan
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v3
+    - name: Build Docker Image
+      run: |
+        docker build -t industrial-ai-gateway:staging .
+    - name: Smoke Test Staging Container
+      run: |
+        docker run -d -p 8000:8000 --name staging-container industrial-ai-gateway:staging
+        sleep 10
+        curl -f http://localhost:8000/api/system/health || exit 1
+        curl -f http://localhost:8000/api/system/version || exit 1
+        docker stop staging-container

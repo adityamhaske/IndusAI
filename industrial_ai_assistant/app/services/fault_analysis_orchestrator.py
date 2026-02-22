@@ -30,7 +30,8 @@ from app.core.fault_exceptions import (
     DatasetNotLoadedError,
     FaultRowNotFoundError,
 )
-from app.core.interfaces.llm_interface import LLMInterface
+from app.services.ai_gateway import AIGatewayService
+from app.models.ai_models import AIRequest
 from app.core.llm_exceptions import LLMConnectionError, LLMResponseParseError
 from app.models.fault_analysis_models import (
     FaultAnalysisRequest,
@@ -76,11 +77,11 @@ _LLM_JSON_SCHEMA = """{
 
 
 class FaultAnalysisOrchestrator:
-    """Orchestrates deterministic stats + RAG + LLM into a single structured response."""
+    """Orchestrates deterministic stats + RAG + AIGateway LLM into a single structured response."""
 
     def __init__(
         self,
-        llm: LLMInterface,
+        llm: AIGatewayService,
         rag_service: RAGService,
         validator: FaultResponseValidator,
         fault_service: Optional[FaultService] = None,
@@ -153,7 +154,7 @@ class FaultAnalysisOrchestrator:
         trend = compute_trend(delta_last_30m, rolling_avg_1h)
         
         # Integrity validation
-        integrity_passed = check_metric_integrity(burst, burst_count, occ_1h)
+        integrity_passed = check_metric_integrity(burst, burst_count, occ_1h, anomaly_score)
         
         confidence = compute_confidence(
             burst_detected=burst,
@@ -190,7 +191,7 @@ class FaultAnalysisOrchestrator:
 
         # ── Step 4: Build prompt & Check Integrity ────────────────────────────
         if not integrity_passed:
-            logger.warning("Stat integrity failed for row %d. Bypassing LLM.", request.row_id)
+            logger.warning("Stat integrity failed or sample-size trace too small for row %d. Bypassing LLM.", request.row_id)
             total_ms = (time.perf_counter() - t_total_start) * 1000
             
             # Construct a synthetic successful response masking the LLM output
@@ -198,7 +199,7 @@ class FaultAnalysisOrchestrator:
                 "occurrences_1h": occ_1h,
                 "occurrences_24h": occ_24h,
                 "burst_detected": burst,
-                "burst_window_minutes": 10.0, # Defaulting from stats engine
+                "burst_window_minutes": ds.stats_cache.get("burst_window_minutes", 10.0), # Defaulting from stats engine
                 "burst_count": burst_count,
                 "co_occurrence": [{"fault": co_fault, "count": co_count}] if co_fault else [],
                 "trend": trend
@@ -215,8 +216,8 @@ class FaultAnalysisOrchestrator:
                 confidence="LOW",
                 statistics=statistics,
                 evidence=synthetic_evidence,
-                diagnosis="STATISTICAL INCONSISTENCY DETECTED. The recorded burst constraints contradict hourly occurrences.",
-                primary_action="Investigate upstream telemetry collection agent for packet dropping.",
+                diagnosis="DATA INTEGRITY WARNING / INSUFFICIENT SAMPLE. Statistical inconsistency detected. LLM explanation suppressed.",
+                primary_action="Verify telemetry sensor logs and re-index dataset constraints.",
                 docs_used=0,
                 sources=[],
                 hallucinated_tags_removed=[],
@@ -249,16 +250,36 @@ class FaultAnalysisOrchestrator:
         if _DEBUG_LLM:
             logger.debug("[DEBUG_LLM] Full prompt:\n%s", prompt)
 
+        # Telemetry calculation for L9 review:
+        prompt_len = len(prompt)
+        doc_len = sum(len(d.content) for d in rag_docs)
+        retrieval_coverage_score = (doc_len / prompt_len) if prompt_len > 0 else 0.0
+
         # ── Step 5: LLM call (with retry) ────────────────────────────────────
         t_llm_start = time.perf_counter()
-        llm_output, is_fallback = self._call_llm_with_retry(prompt)
+        llm_output, is_fallback, raw_output = self._call_llm_with_retry(prompt, retrieval_coverage_score=retrieval_coverage_score)
         llm_ms = (time.perf_counter() - t_llm_start) * 1000
 
         # ── Step 6: Validation ────────────────────────────────────────────────
         doc_sources = [d.source_file for d in rag_docs]
-        cleaned, hallucinated, val_warnings = self._validator.validate(
-            llm_output, doc_sources, known_tags=None
-        )
+        
+        if llm_output is not None:
+            cleaned, hallucinated, val_warnings = self._validator.validate(
+                llm_output, doc_sources, known_tags=None
+            )
+            diagnosis_text = cleaned.diagnosis
+            action_text = cleaned.primary_action
+            evidence_data = cleaned.metrics
+            final_confidence = cleaned.confidence or confidence
+        else:
+            # L9 JSON Resiliency fallback
+            logger.error("JSON parsing failed entirely for row %d. Degrading to raw text display.", request.row_id)
+            diagnosis_text = f"[STRUCTURED PARSE FAILED - RAW OUTPUT]\n{raw_output}"
+            action_text = "Manual Review Required - AI Response was malformed."
+            evidence_data = statistics # Fallback to deterministic stats
+            final_confidence = "LOW"
+            hallucinated = []
+            val_warnings = ["LLM response was not valid JSON. Returned raw text instead."]
 
         total_ms = (time.perf_counter() - t_total_start) * 1000
 
@@ -277,11 +298,11 @@ class FaultAnalysisOrchestrator:
             device=device,
             timestamp=ref_ts,
             user_question=request.question,
-            confidence=cleaned.confidence or confidence,
+            confidence=final_confidence,
             statistics=statistics,
-            evidence=cleaned.metrics,  # Maps clean nested v3 metrics structure
-            diagnosis=cleaned.diagnosis,
-            primary_action=cleaned.primary_action,
+            evidence=evidence_data,  # Maps clean nested v3 metrics structure
+            diagnosis=diagnosis_text,
+            primary_action=action_text,
             docs_used=len(rag_docs),
             sources=rag_docs,
             hallucinated_tags_removed=hallucinated,
@@ -294,35 +315,43 @@ class FaultAnalysisOrchestrator:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _call_llm_with_retry(
-        self, prompt: str, max_retries: int = 1
-    ) -> tuple[StructuredLLMOutput, bool]:
+        self, prompt: str, max_retries: int = 1, retrieval_coverage_score: Optional[float] = None
+    ) -> tuple[Optional[StructuredLLMOutput], bool, str]:
         """
-        Call LLM and parse response. Retry once on parse failure.
-        Raises LLMConnectionError / LLMResponseParseError — no silent fallback.
+        Call LLM Gateway and parse response. Retry once on parse failure.
+        Raises LLMConnectionError on timeout/connection failure.
+        Returns (parsed_output, is_fallback, raw_output). parsed_output is None if schema validations fail.
         """
         last_exc = None
+        raw_out = ""
         for attempt in range(max_retries + 1):
-            try:
-                t0 = time.perf_counter()
-                raw = self._llm.generate(prompt)
-                logger.debug("LLM attempt %d raw response (%.0fms): %s",
-                             attempt + 1, (time.perf_counter() - t0) * 1000, raw[:120])
-                parsed = _parse_llm_json(raw)
-                return parsed, False
-            except LLMConnectionError:
-                raise   # propagate immediately — no retry
-            except Exception as exc:
-                last_exc = exc
-                logger.warning(
-                    "LLM attempt %d/%d parse failed: %s",
-                    attempt + 1, max_retries + 1, exc,
-                    exc_info=(attempt == max_retries)   # full trace only on last attempt
-                )
+            t0 = time.perf_counter()
+            req = AIRequest(
+                prompt=prompt,
+                response_format="json",
+                json_schema=StructuredLLMOutput.schema()
+            )
+            res = self._llm.execute(req, retrieval_coverage_score=retrieval_coverage_score)
+            raw_out = res.raw_output
+            
+            logger.debug("LLM attempt %d raw response (%.0fms): %s",
+                         attempt + 1, (time.perf_counter() - t0) * 1000, res.raw_output[:120])
+                         
+            if res.success and res.parsed_output:
+                try:
+                    parsed = StructuredLLMOutput(**res.parsed_output)
+                    return parsed, False, raw_out
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning("LLM attempt %d/%d pydantic schema validation failed: %s", attempt + 1, max_retries + 1, exc)
+            else:
+                if res.error_type in ["CONNECTION", "TIMEOUT"]:
+                    raise LLMConnectionError(f"Gateway Error: {res.error}")
+                last_exc = res.error
+                logger.warning("LLM attempt %d/%d execute failed: %s", attempt + 1, max_retries + 1, res.error)
 
-        raise LLMResponseParseError(
-            f"LLM failed to return valid structured JSON after {max_retries + 1} attempt(s). "
-            f"Last error: {last_exc}"
-        )
+        logger.error("LLM failed to return valid JSON. Degrading to raw text. Last Error: %s", last_exc)
+        return None, False, raw_out
 
 
 # ── Prompt builder ────────────────────────────────────────────────────────────

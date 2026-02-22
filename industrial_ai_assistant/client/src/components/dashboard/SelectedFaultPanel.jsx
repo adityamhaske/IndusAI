@@ -64,6 +64,8 @@ const SelectedFaultPanel = ({ fault, detail, analysis, analysisError, systemStat
 
     const isAnalyzed = !!analysis;
     const isIntegrityFailure = analysis?.statistics?.integrity_passed === false;
+    const isParseFailed = analysis?.diagnosis?.startsWith('[STRUCTURED PARSE FAILED - RAW OUTPUT]');
+    const displayDiagnosis = isParseFailed ? analysis.diagnosis.replace('[STRUCTURED PARSE FAILED - RAW OUTPUT]\n', '') : analysis?.diagnosis;
 
     return (
         <div className="bg-white flex flex-col h-full w-[380px] shadow-2xl absolute right-0 top-0 bottom-0 z-50">
@@ -173,15 +175,28 @@ const SelectedFaultPanel = ({ fault, detail, analysis, analysisError, systemStat
                                 <div className="space-y-2">
                                     <h3 className="text-[10px] font-bold text-industrial-400 uppercase tracking-widest flex justify-between">
                                         <span>Diagnosis</span>
-                                        <span className={`px-1.5 rounded ${analysis.confidence === 'HIGH' ? 'bg-green-100 text-green-700' :
+                                        <div className="flex gap-2">
+                                            {isParseFailed && (
+                                                <span className="px-1.5 rounded bg-amber-100 text-amber-700 font-bold border border-amber-200">
+                                                    RAW OUTPUT (PARSE FAILED)
+                                                </span>
+                                            )}
+                                            <span className={`px-1.5 rounded ${analysis.confidence === 'HIGH' ? 'bg-green-100 text-green-700' :
                                                 analysis.confidence === 'MEDIUM' ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'
-                                            }`}>
-                                            CONFIDENCE: {analysis.confidence}
-                                        </span>
+                                                }`}>
+                                                CONFIDENCE: {analysis.confidence}
+                                            </span>
+                                        </div>
                                     </h3>
-                                    <p className="text-lg font-bold text-industrial-900 leading-snug">
-                                        {analysis.diagnosis}
-                                    </p>
+                                    {isParseFailed ? (
+                                        <div className="bg-amber-50 rounded p-3 border border-amber-200 text-amber-900 text-sm font-mono whitespace-pre-wrap">
+                                            {displayDiagnosis}
+                                        </div>
+                                    ) : (
+                                        <p className="text-lg font-bold text-industrial-900 leading-snug">
+                                            {displayDiagnosis}
+                                        </p>
+                                    )}
                                 </div>
                             </>
                         )}

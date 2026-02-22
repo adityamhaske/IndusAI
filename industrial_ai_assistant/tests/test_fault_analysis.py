@@ -50,20 +50,20 @@ def loaded_service():
 # ── Confidence tests ───────────────────────────────────────────────────────────
 
 def test_confidence_high():
-    assert compute_confidence(occurrences_1h=12, burst_detected=True) == "HIGH"
+    assert compute_confidence(occurrences_1h=12, burst_detected=True, anomaly_score=4.0, integrity_passed=True) == "HIGH"
 
 
 def test_confidence_medium_freq():
-    assert compute_confidence(occurrences_1h=5, burst_detected=False) == "MEDIUM"
+    assert compute_confidence(occurrences_1h=5, burst_detected=False, anomaly_score=0.5, integrity_passed=True) == "MEDIUM"
 
 
 def test_confidence_low():
-    assert compute_confidence(occurrences_1h=1, burst_detected=False) == "LOW"
+    assert compute_confidence(occurrences_1h=1, burst_detected=False, anomaly_score=0.1, integrity_passed=True) == "LOW"
 
 
 def test_confidence_boundary_no_burst():
     # >= 10 occurrences but no burst → MEDIUM not HIGH
-    assert compute_confidence(occurrences_1h=10, burst_detected=False) == "MEDIUM"
+    assert compute_confidence(occurrences_1h=10, burst_detected=False, anomaly_score=0.8, integrity_passed=True) == "MEDIUM"
 
 
 # ── Analysis guard tests ───────────────────────────────────────────────────────

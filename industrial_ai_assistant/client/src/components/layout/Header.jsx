@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { Cpu, WifiOff, RefreshCw, Database, RotateCcw } from 'lucide-react';
-import systemApi from '../../api/systemApi';
-import { getProjectStatus } from '../../api/knowledgeApi';
+import systemApi from '../../services/systemApi';
+import { getProjectStatus } from '../../services/knowledgeApi';
 import useAppStore from '../../store/useAppStore';
 
 function llmLabel(health) {

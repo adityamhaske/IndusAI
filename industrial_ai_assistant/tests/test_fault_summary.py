@@ -72,7 +72,7 @@ def test_burst_detection_no_burst():
         "fault_code": ["E001"] * 10,
         "timestamp": pd.date_range("2024-01-01", periods=10, freq="1h", tz="UTC"),
     })
-    burst, desc = compute_fault_burst(df, threshold=5, window_min=10)
+    burst, desc, count = compute_fault_burst(df, threshold=5, window_min=10)
     assert burst is False
 
 
@@ -81,7 +81,7 @@ def test_burst_detection_with_burst():
         "fault_code": ["E001"] * 10,
         "timestamp": pd.date_range("2024-01-01", periods=10, freq="1min", tz="UTC"),
     })
-    burst, desc = compute_fault_burst(df, threshold=5, window_min=10)
+    burst, desc, count = compute_fault_burst(df, threshold=5, window_min=10)
     assert burst is True
     assert desc is not None
 

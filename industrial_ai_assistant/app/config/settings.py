@@ -27,6 +27,15 @@ class Settings(BaseSettings):
     QDRANT_COLLECTION: str = "industrial_docs"
     
     EMBEDDING_MODEL_NAME: str = "all-MiniLM-L6-v2"
+
+    # API Keys (Injected via Environment, never logged)
+    OPENAI_API_KEY: str = ""
+    GEMINI_API_KEY: str = ""
+
+    # Deployment Feature Flags (Canary / Cost Guards)
+    ENABLE_CLOUD_PROVIDERS: bool = False
+    ENABLE_SPECULATIVE_FALLBACK: bool = False
+    MAX_DAILY_COST_USD: float = 5.0
     
     GOLDEN_DATASET_PATH: str = "./golden_dataset.json"
 

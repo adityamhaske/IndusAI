@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { Trash2, BarChart3, RefreshCw } from 'lucide-react';
-import { faultApi } from '../api/faultApi';
-import systemApi from '../api/systemApi';
+import { faultApi } from '../services/faultApi';
+import systemApi from '../services/systemApi';
 import UploadZone from '../components/dashboard/UploadZone';
 import FaultSummaryCard from '../components/dashboard/FaultSummaryCard';
 import VirtualizedFaultTable from '../components/dashboard/VirtualizedFaultTable';

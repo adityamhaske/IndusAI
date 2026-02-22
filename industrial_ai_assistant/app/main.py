@@ -1,12 +1,13 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import routes_chat, routes_logs, routes_history, routes_project
+from app.api import routes_logs, routes_history, routes_project
 from app.api.routes_fault import router as fault_router
 from app.api.routes_system import router as system_router
 from app.api.routes_project_knowledge import router as project_knowledge_router
 from app.api.routes_knowledge import router as knowledge_router
 from app.api.routes_ingest_upload import router as ingest_upload_router
+from app.api import routes_ai
 from app.config.settings import settings
 import os
 
@@ -22,7 +23,6 @@ app.add_middleware(
 )
 
 # Include Routers
-app.include_router(routes_chat.router, prefix="/api", tags=["Chat"])
 app.include_router(routes_logs.router, prefix="/api/system", tags=["Logs"])
 app.include_router(routes_history.router, prefix="/api", tags=["History"])
 app.include_router(routes_project.router, prefix="/api", tags=["Projects"])
@@ -31,6 +31,7 @@ app.include_router(system_router, prefix="/api/system", tags=["System"])
 app.include_router(project_knowledge_router, prefix="/api", tags=["Project Knowledge"])
 app.include_router(knowledge_router, prefix="/api", tags=["Knowledge"])
 app.include_router(ingest_upload_router, prefix="/api", tags=["Ingest Upload"])
+app.include_router(routes_ai.router, prefix="/api/ai", tags=["AI Gateway"])
 
 @app.get("/api/health")
 def health_check():

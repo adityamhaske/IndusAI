@@ -18,14 +18,14 @@ export const HistoryPage = () => (
     </div>
 );
 
+// ── UI Dependencies ──────────────────────────────────────────────────────────────
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
     FolderOpen, RefreshCw, Trash2, CheckCircle2, AlertTriangle,
-    Loader2, Database, FileText, Cpu, Hash, Upload, FolderSearch,
-    FileCode, FileSpreadsheet, FileCog, ChevronRight, ChevronDown, File,
-    Settings, Server, Brain
+    Loader2, Database, FileText, Cpu, Hash, Upload, FolderSearch, File, Frown
 } from 'lucide-react';
-import { getProjectStatus, resetProject } from '../api/knowledgeApi';
+import { getProjectStatus, resetProject, getProjectFiles } from '../services/knowledgeApi';
+import { projectApi } from '../services/projectApi';
 
 const STATE_COLORS = {
     READY: 'text-green-600 bg-green-50 border-green-200',
@@ -40,50 +40,45 @@ function statusColor(state) {
 }
 
 const StatBox = ({ label, value, icon: Icon }) => (
-    <div className="flex flex-col gap-1 bg-white border border-industrial-200 rounded-xl p-4">
+    <div className="flex flex-col gap-1 bg-white border border-industrial-200 rounded-xl p-4 shadow-sm">
         <div className="flex items-center gap-1.5 text-xs text-industrial-400 font-medium uppercase tracking-wide">
             {Icon && <Icon className="w-3.5 h-3.5" />}
             {label}
         </div>
-        <p className="text-2xl font-bold text-industrial-800 tabular-nums">{value ?? '—'}</p>
+        <p className="text-2xl font-bold text-industrial-800 tabular-nums truncate">{value ?? '—'}</p>
     </div>
 );
 
-// ── Recursive File Tree Node ──
-const FileTreeNode = ({ node, level = 0 }) => {
-    const [expanded, setExpanded] = useState(false);
-    const isFolder = node.type === "folder";
-
-    const getIcon = () => {
-        if (isFolder) return <FolderOpen className={`w-4 h-4 ${expanded ? 'text-primary-500' : 'text-industrial-400'}`} />;
-        const name = node.name.toLowerCase();
-        if (name.endsWith('.l5x')) return <FileCode className="w-4 h-4 text-orange-500" />;
-        if (name.endsWith('.xlsx') || name.endsWith('.csv')) return <FileSpreadsheet className="w-4 h-4 text-green-600" />;
-        if (name.endsWith('.pdf')) return <FileCog className="w-4 h-4 text-red-500" />;
-        return <File className="w-4 h-4 text-industrial-400" />;
-    };
+// ── Folder Tree Component ───────────────────────────────────────────────────────
+const FolderTreeNode = ({ node, level = 0 }) => {
+    const [expanded, setExpanded] = useState(level < 1);
+    const isFolder = node.type === 'folder';
 
     return (
-        <div className="text-sm font-mono filter-none select-none">
+        <div className="flex flex-col">
             <div
-                className={`flex items-center gap-2 py-1.5 px-2 hover:bg-industrial-50 rounded cursor-pointer ${level === 0 ? 'font-semibold text-industrial-800' : 'text-industrial-600'}`}
+                className={`flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-industrial-50 select-none ${isFolder ? 'cursor-pointer' : ''}`}
                 style={{ paddingLeft: `${level * 16 + 8}px` }}
                 onClick={() => isFolder && setExpanded(!expanded)}
             >
-                <div className="w-4 h-4 flex items-center justify-center flex-shrink-0">
-                    {isFolder ? (
-                        expanded ? <ChevronDown className="w-3.5 h-3.5 text-industrial-400" /> : <ChevronRight className="w-3.5 h-3.5 text-industrial-400" />
-                    ) : null}
-                </div>
-                {getIcon()}
-                <span className="truncate">{node.name}</span>
+                {isFolder ? (
+                    <FolderOpen className={`w-4 h-4 flex-shrink-0 transition-transform ${expanded ? 'text-primary-500' : 'text-industrial-400'}`} />
+                ) : (
+                    <File className="w-4 h-4 text-industrial-300 flex-shrink-0" />
+                )}
+                <span className={`text-sm truncate ${isFolder ? 'font-medium text-industrial-700' : 'text-industrial-600'}`}>
+                    {node.name}
+                </span>
+                {!isFolder && (
+                    <div className="ml-auto flex items-center">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-green-500 flex-shrink-0" title="Indexed" />
+                    </div>
+                )}
             </div>
-
             {isFolder && expanded && node.children && (
-                <div className="flex flex-col relative w-full">
-                    <div className="absolute left-[22px] top-0 bottom-0 w-px bg-industrial-200" style={{ left: `${level * 16 + 26}px` }} />
+                <div className="flex flex-col w-full">
                     {node.children.map((child, i) => (
-                        <FileTreeNode key={`${child.path}-${i}`} node={child} level={level + 1} />
+                        <FolderTreeNode key={`${child.path}-${i}`} node={child} level={level + 1} />
                     ))}
                 </div>
             )}
@@ -91,9 +86,11 @@ const FileTreeNode = ({ node, level = 0 }) => {
     );
 };
 
+// ── Project Page ──────────────────────────────────────────────────────────────
 export const ProjectPage = () => {
     const [projectId] = useState('default');
     const [status, setStatus] = useState(null);
+    const [filesTree, setFilesTree] = useState([]);
     const [ingesting, setIngesting] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(null);
     const [error, setError] = useState('');
@@ -102,42 +99,37 @@ export const ProjectPage = () => {
     const [folderName, setFolderName] = useState('');
     const [manualPath, setManualPath] = useState('');
     const [useUpload, setUseUpload] = useState(true);
-    const [fileTree, setFileTree] = useState(null);
 
     const pollRef = useRef(null);
     const fileInputRef = useRef(null);
 
-    const fetchTree = useCallback(async () => {
+    const fetchStatusAndFiles = useCallback(async () => {
         try {
-            const res = await fetch(`/api/project/files?project_id=${projectId}`);
-            if (res.ok) setFileTree(await res.json());
-        } catch { /* ignore */ }
-    }, [projectId]);
+            const [s, f] = await Promise.all([
+                getProjectStatus(projectId).catch(() => null),
+                getProjectFiles(projectId).catch(() => [])
+            ]);
+            if (s) setStatus(s);
+            if (f) setFilesTree(f);
 
-    const fetchStatus = useCallback(async () => {
-        try {
-            const s = await getProjectStatus(projectId);
-            setStatus(s);
-            const done = ['READY', 'FAILED', 'UNLOADED'].includes(s.index_state);
+            const done = s && ['READY', 'FAILED', 'UNLOADED'].includes(s.index_state);
             if (done && pollRef.current) {
                 clearInterval(pollRef.current);
                 pollRef.current = null;
                 setIngesting(false);
-                if (s.index_state === 'READY') fetchTree();
             }
-        } catch { /* ignore */ }
-    }, [projectId, fetchTree]);
+        } catch { }
+    }, [projectId]);
 
     const startPoll = () => {
         if (pollRef.current) clearInterval(pollRef.current);
-        pollRef.current = setInterval(fetchStatus, 2000);
+        pollRef.current = setInterval(fetchStatusAndFiles, 2000);
     };
 
     useEffect(() => {
-        fetchStatus();
-        fetchTree();
+        fetchStatusAndFiles();
         return () => { if (pollRef.current) clearInterval(pollRef.current); };
-    }, [fetchStatus, fetchTree]);
+    }, [fetchStatusAndFiles]);
 
     const onFolderPicked = (e) => {
         const files = e.target.files;
@@ -165,16 +157,8 @@ export const ProjectPage = () => {
         }
 
         try {
-            const res = await fetch('/api/project/ingest-upload', { method: 'POST', body: form });
-            const text = await res.text();
-            let data = {};
-            try { data = text ? JSON.parse(text) : {}; } catch { data.message = text || `Upload error ${res.status}`; }
-            if (!res.ok) {
-                setError(data.message || `Upload error ${res.status}`);
-                setIngesting(false);
-                if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-            }
-            await fetchStatus();
+            await projectApi.ingestUpload(projectId, selectedFiles);
+            await fetchStatusAndFiles();
         } catch (e) {
             setError(e.message || 'Upload failed');
             setIngesting(false);
@@ -188,8 +172,8 @@ export const ProjectPage = () => {
         if (!manualPath.trim()) { setError('Enter a folder path.'); return; }
         setError(''); setPathDiag(null);
         try {
-            const res = await fetch(`/api/project/debug-path?folder_path=${encodeURIComponent(manualPath.trim())}`);
-            setPathDiag(await res.json());
+            const diag = await projectApi.debugPath(manualPath.trim());
+            setPathDiag(diag);
         } catch { setError('Could not reach backend.'); }
     };
 
@@ -197,25 +181,10 @@ export const ProjectPage = () => {
         if (!manualPath.trim()) { setError('Enter a folder path.'); return; }
         setError(''); setPathDiag(null); setIngesting(true); startPoll();
         try {
-            const res = await fetch('/api/project/ingest', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ folder_path: manualPath.trim(), project_id: projectId }),
-            });
-            const text = await res.text();
-            let data = {};
-            try { data = text ? JSON.parse(text) : {}; } catch { data.message = text || `Error ${res.status}`; }
-
-            if (!res.ok) {
-                if (data.error && (data.resolved_path || data.provided_path)) setPathDiag(data);
-                setError(data.message || `Error ${res.status}`);
-                setIngesting(false);
-                if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-                return;
-            }
-            await fetchStatus();
+            await projectApi.ingestPath(projectId, manualPath.trim());
+            await fetchStatusAndFiles();
         } catch (e) {
-            setError(e.message || 'Failed');
+            setError(e.message || 'Ingest failed');
             setIngesting(false);
             if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
         }
@@ -225,185 +194,226 @@ export const ProjectPage = () => {
         if (!window.confirm('Reset project index? This cannot be undone.')) return;
         try {
             await resetProject(projectId);
-            setSelectedFiles(null); setFolderName(''); setFileTree(null);
-            await fetchStatus();
+            setSelectedFiles(null); setFolderName('');
+            setFilesTree([]);
+            await fetchStatusAndFiles();
         } catch (e) { setError(e.message); }
     };
 
     return (
-        <div className="p-6 h-full flex flex-col items-center">
-            <div className="w-full max-w-6xl space-y-6 flex-1 flex flex-col">
-                <div>
-                    <h2 className="text-2xl font-bold text-industrial-800">Project Workspace</h2>
-                    <p className="text-sm text-industrial-400 mt-1">Manage knowledge base indexing and telemetry configurations.</p>
+        <div className="flex flex-col h-full w-full bg-industrial-50">
+            {/* Header */}
+            <header className="flex-shrink-0 bg-white border-b border-industrial-200 px-6 py-4 flex items-center justify-between z-10">
+                <div className="flex items-center gap-3">
+                    <Database className="w-5 h-5 text-primary-600" />
+                    <div>
+                        <h2 className="text-xl font-bold text-industrial-800">Project Information</h2>
+                        <p className="text-xs text-industrial-400 font-medium">Manage operational project data and vector knowledge stores.</p>
+                    </div>
                 </div>
+                {status && (
+                    <div className="flex items-center gap-3">
+                        {status.index_state === 'INDEXING' && (
+                            <span className="text-xs text-industrial-500 font-medium flex items-center gap-1.5 px-3 py-1 bg-industrial-100 rounded-full">
+                                <Loader2 className="w-3 h-3 animate-spin" /> Indexing Engine Active
+                            </span>
+                        )}
+                        <span className={`text-xs font-bold px-3 py-1 rounded-full border ${statusColor(status.index_state)} uppercase tracking-wide`}>
+                            {status.index_state}
+                        </span>
+                    </div>
+                )}
+            </header>
 
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start flex-1 min-h-0">
+            {/* 2-Column Main Layout */}
+            <div className="flex-1 overflow-hidden flex flex-col md:flex-row p-6 gap-6">
 
-                    {/* ── LEFT PANEL: Controls & Status ── */}
-                    <div className="space-y-6 overflow-y-auto pr-2 pb-6">
-                        <section className="bg-white border border-industrial-200 rounded-2xl p-6 shadow-sm space-y-5">
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                    <Database className="w-5 h-5 text-primary-600" />
-                                    <h3 className="text-lg font-semibold text-industrial-800">Knowledge Indexing</h3>
-                                </div>
-                                <div className="flex rounded-lg border border-industrial-200 overflow-hidden text-xs">
-                                    <button onClick={() => { setUseUpload(true); setError(''); setPathDiag(null); }} className={`px-3 py-1.5 font-medium transition-colors ${useUpload ? 'bg-primary-600 text-white' : 'text-industrial-500 hover:bg-industrial-50'}`}>📁 Upload</button>
-                                    <button onClick={() => { setUseUpload(false); setError(''); setPathDiag(null); }} className={`px-3 py-1.5 font-medium transition-colors ${!useUpload ? 'bg-primary-600 text-white' : 'text-industrial-500 hover:bg-industrial-50'}`}>⌨ Path</button>
-                                </div>
+                {/* LEFT PANEL: Metadata & Upload Control */}
+                <div className="w-full md:w-1/2 lg:w-[55%] flex flex-col gap-6 overflow-y-auto pr-2 pb-6">
+
+                    {/* Telemetry Block */}
+                    <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+                        <StatBox label="Indexed Tags" value={status?.tags_indexed?.toLocaleString()} icon={Cpu} />
+                        <StatBox label="L5X Routines" value={status?.routines_indexed?.toLocaleString()} icon={FileText} />
+                        <StatBox label="IO Rows" value={status?.io_rows_indexed?.toLocaleString()} icon={Database} />
+                        <StatBox label="Semantic Chunks" value={status?.semantic_chunks?.toLocaleString()} icon={FileText} />
+                        <StatBox label="Failed Files" value={status?.errors?.length ?? 0} icon={AlertTriangle} />
+                        <StatBox label="Index Memory" value={status?.memory_footprint_mb ? `${status.memory_footprint_mb.toFixed(1)} MB` : '—'} icon={Cpu} />
+                    </div>
+
+                    {status?.errors?.length > 0 && (
+                        <div className="bg-red-50 border border-red-200 rounded-xl p-4 space-y-2">
+                            <p className="text-sm font-semibold text-red-700 flex items-center gap-2">
+                                <AlertTriangle className="w-4 h-4" /> Ingestion Error Traces
+                            </p>
+                            <div className="max-h-32 overflow-y-auto text-xs text-red-600 space-y-1 font-mono">
+                                {status.errors.map((e, i) => (
+                                    <p key={i} className="truncate" title={e}>{e}</p>
+                                ))}
                             </div>
+                        </div>
+                    )}
 
-                            {useUpload ? (
-                                <div className="space-y-4">
-                                    <input ref={fileInputRef} type="file" webkitdirectory="true" directory="true" multiple className="hidden" onChange={onFolderPicked} accept=".l5x,.L5X,.xlsx,.xls,.pdf,.txt,.md,.csv" />
-                                    <div onClick={() => !ingesting && fileInputRef.current?.click()} className={`border-2 border-dashed rounded-xl p-6 flex flex-col items-center gap-2 cursor-pointer transition-colors ${folderName ? 'border-primary-300 bg-primary-50' : 'border-industrial-200 hover:border-primary-300 hover:bg-primary-50'} ${ingesting ? 'opacity-50 pointer-events-none' : ''}`}>
-                                        <FolderSearch className={`w-8 h-8 ${folderName ? 'text-primary-500' : 'text-industrial-300'}`} />
-                                        {folderName ? (
-                                            <div className="text-center"><p className="font-semibold text-primary-700">📁 {folderName}</p><p className="text-xs text-primary-500">{selectedFiles?.length} files selected</p></div>
-                                        ) : (
-                                            <div className="text-center"><p className="font-medium text-industrial-500">Pick Folder</p></div>
-                                        )}
-                                    </div>
-                                    {uploadProgress && (
-                                        <div className="space-y-1.5"><div className="h-1.5 bg-industrial-100 rounded-full overflow-hidden"><div className="h-full bg-primary-500 transition-all" style={{ width: `${uploadProgress.pct}%` }} /></div><p className="text-xs text-industrial-400 text-center">Uploading {uploadProgress.sent} / {uploadProgress.total}…</p></div>
+                    {/* Uploader Card */}
+                    <div className="bg-white border border-industrial-200 rounded-2xl p-5 shadow-sm space-y-5 flex-shrink-0">
+                        <div className="flex items-center justify-between">
+                            <h3 className="text-base font-bold text-industrial-800">Add Project Source Data</h3>
+                            <div className="flex rounded-lg border border-industrial-200 overflow-hidden text-xs">
+                                <button
+                                    onClick={() => { setUseUpload(true); setError(''); setPathDiag(null); }}
+                                    className={`px-3 py-1.5 font-medium transition-colors ${useUpload ? 'bg-primary-600 text-white' : 'text-industrial-500 hover:bg-industrial-50'}`}
+                                >
+                                    Picker
+                                </button>
+                                <button
+                                    onClick={() => { setUseUpload(false); setError(''); setPathDiag(null); }}
+                                    className={`px-3 py-1.5 font-medium transition-colors ${!useUpload ? 'bg-primary-600 text-white' : 'text-industrial-500 hover:bg-industrial-50'}`}
+                                >
+                                    Path
+                                </button>
+                            </div>
+                        </div>
+
+                        {useUpload ? (
+                            <div className="space-y-4">
+                                <input
+                                    ref={fileInputRef}
+                                    type="file"
+                                    // @ts-ignore
+                                    webkitdirectory="true" directory="true" multiple
+                                    className="hidden" onChange={onFolderPicked}
+                                    accept=".l5x,.L5X,.xlsx,.xls,.pdf,.txt,.md,.csv"
+                                />
+
+                                <div
+                                    onClick={() => !ingesting && fileInputRef.current?.click()}
+                                    className={`border-2 border-dashed rounded-xl p-6 flex flex-col items-center gap-3 cursor-pointer transition-colors ${folderName
+                                        ? 'border-primary-300 bg-primary-50'
+                                        : 'border-industrial-200 hover:border-primary-300 hover:bg-primary-50'
+                                        } ${ingesting ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''}`}
+                                >
+                                    <FolderSearch className={`w-8 h-8 ${folderName ? 'text-primary-500' : 'text-industrial-300'}`} />
+                                    {folderName ? (
+                                        <div className="text-center">
+                                            <p className="font-bold text-primary-700 truncate max-w-xs">{folderName}</p>
+                                            <p className="text-xs text-primary-500 mt-0.5">{selectedFiles?.length} files scheduled</p>
+                                        </div>
+                                    ) : (
+                                        <div className="text-center">
+                                            <p className="font-semibold text-industrial-600">Select source folder...</p>
+                                            <p className="text-xs text-industrial-400 mt-1 max-w-xs leading-relaxed">Imports local .L5X logic, IO spreadsheets, and PDF schematics seamlessly into Qdrant.</p>
+                                        </div>
                                     )}
                                 </div>
-                            ) : (
-                                <div className="space-y-3">
-                                    <input type="text" value={manualPath} onChange={e => setManualPath(e.target.value)} placeholder="Absolute path" className="w-full border border-industrial-200 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-none focus:border-primary-400" />
-                                </div>
-                            )}
-
-                            {error && (
-                                <div className="flex flex-col gap-1 text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl p-4">
-                                    <div className="flex items-center gap-2 font-semibold">
-                                        <AlertTriangle className="w-4 h-4 flex-shrink-0" />
-                                        Indexing Failed
-                                    </div>
-                                    <div className="pl-6 text-xs font-mono">{error}</div>
-                                </div>
-                            )}
-
-                            {pathDiag && (
-                                <div className={`rounded-xl border p-4 text-xs font-mono space-y-1.5 ${pathDiag.ok ? 'bg-green-50 border-green-200 text-green-700' : 'bg-red-50 border-red-200 text-red-700'}`}>
-                                    <p className="font-semibold text-sm font-sans mb-2 flex items-center gap-1.5">
-                                        {pathDiag.ok ? <><CheckCircle2 className="w-4 h-4" /> Valid</> : <><AlertTriangle className="w-4 h-4" /> {pathDiag.error_code || pathDiag.error}</>}
-                                    </p>
-                                    <div className="grid grid-cols-[max-content_1fr] gap-x-2 gap-y-1"><span>Provided:</span><span className="break-all">{pathDiag.provided_path}</span><span>Resolved:</span><span className="break-all">{pathDiag.resolved_path}</span></div>
-                                    {pathDiag.message && !pathDiag.ok && <p className="mt-1 font-sans text-red-600">{pathDiag.message}</p>}
-                                </div>
-                            )}
-
-                            <div className="flex gap-3 flex-wrap">
-                                {useUpload ? (
-                                    <button onClick={startUploadIngestion} disabled={ingesting || !selectedFiles} className="flex flex-1 items-center justify-center gap-2 px-5 py-2.5 bg-primary-600 text-white rounded-xl text-sm font-medium hover:bg-primary-700 disabled:opacity-40 transition-colors">
-                                        {ingesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-                                        {ingesting ? 'Indexing documents...' : status?.project_loaded ? 'Reindex' : 'Upload & Index'}
-                                    </button>
-                                ) : (
-                                    <>
-                                        <button onClick={testPath} disabled={ingesting || !manualPath.trim()} className="flex items-center gap-2 px-4 py-2.5 border border-industrial-300 text-industrial-600 rounded-xl text-sm font-medium hover:bg-industrial-50 disabled:opacity-40 transition-colors">
-                                            <FolderOpen className="w-4 h-4" /> Test Path
-                                        </button>
-                                        <button onClick={startPathIngestion} disabled={ingesting || !manualPath.trim()} className="flex flex-1 items-center justify-center gap-2 px-5 py-2.5 bg-primary-600 text-white rounded-xl text-sm font-medium hover:bg-primary-700 disabled:opacity-40 transition-colors">
-                                            {ingesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                                            {ingesting ? 'Indexing documents...' : status?.project_loaded ? 'Reindex' : 'Index'}
-                                        </button>
-                                    </>
-                                )}
-                                {status?.project_loaded && (
-                                    <button onClick={handleReset} disabled={ingesting} className="flex px-4 py-2.5 border border-red-200 text-red-600 rounded-xl text-sm font-medium hover:bg-red-50 disabled:opacity-40 transition-colors">
-                                        <Trash2 className="w-4 h-4" />
-                                    </button>
-                                )}
                             </div>
-                        </section>
+                        ) : (
+                            <div className="space-y-2">
+                                <label className="text-xs font-semibold text-industrial-600 uppercase">Absolute Folder Mount Path</label>
+                                <input
+                                    type="text" value={manualPath} onChange={e => setManualPath(e.target.value)}
+                                    placeholder="/ext-drive/projects/Line6"
+                                    className="w-full border border-industrial-200 rounded-xl px-4 py-2 text-sm text-industrial-800 font-mono focus:border-primary-400 focus:ring-1 focus:ring-primary-400 outline-none"
+                                />
+                            </div>
+                        )}
 
-                        {status && status.index_state !== 'UNLOADED' && (
-                            <section className="bg-white border border-industrial-200 rounded-2xl p-6 shadow-sm space-y-4">
-                                <div className="flex items-center gap-3">
-                                    <span className={`text-xs font-semibold px-3 py-1 rounded-full border ${statusColor(status.index_state)}`}>{status.index_state}</span>
-                                    {status.index_state === 'INDEXING' && <span className="text-xs text-industrial-400 flex items-center gap-1.5"><Loader2 className="w-3 h-3 animate-spin" /> Processing…</span>}
-                                </div>
-                                <div className="grid grid-cols-2 gap-3">
-                                    <StatBox label="Tags" value={status.tags_indexed?.toLocaleString()} icon={Cpu} />
-                                    <StatBox label="IO Rows" value={status.io_rows_indexed?.toLocaleString()} icon={Database} />
-                                    <StatBox label="Chunks" value={status.semantic_chunks?.toLocaleString()} icon={FileText} />
-                                    <StatBox label="Issues" value={status.errors?.length ?? 0} icon={AlertTriangle} />
-                                </div>
-                            </section>
+                        {error && (
+                            <div className="flex items-start gap-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl p-3">
+                                <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                                <div><span className="font-medium">Ingestion failed:</span> <br />{error}</div>
+                            </div>
+                        )}
+
+                        <div className="flex gap-2 items-center flex-wrap pt-2">
+                            {useUpload ? (
+                                <button
+                                    onClick={startUploadIngestion} disabled={ingesting || !selectedFiles}
+                                    className="flex-1 flex items-center justify-center gap-2 px-5 py-2.5 bg-industrial-900 text-white rounded-xl text-sm font-bold hover:bg-industrial-800 disabled:opacity-50 transition-colors shadow-sm"
+                                >
+                                    {ingesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                                    {ingesting ? 'Indexing documents...' : status?.project_loaded ? 'Reindex Delta' : 'Upload & Index'}
+                                </button>
+                            ) : (
+                                <>
+                                    <button
+                                        onClick={testPath} disabled={ingesting || !manualPath.trim()}
+                                        className="px-4 py-2.5 border border-industrial-300 text-industrial-600 rounded-xl text-sm font-bold hover:bg-industrial-50 disabled:opacity-40 transition-colors"
+                                    >
+                                        Validate
+                                    </button>
+                                    <button
+                                        onClick={startPathIngestion} disabled={ingesting || !manualPath.trim()}
+                                        className="flex-1 flex items-center justify-center gap-2 px-5 py-2.5 bg-industrial-900 text-white rounded-xl text-sm font-bold hover:bg-industrial-800 disabled:opacity-50 transition-colors shadow-sm"
+                                    >
+                                        {ingesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderOpen className="w-4 h-4" />}
+                                        {ingesting ? 'Indexing documents...' : 'Start Indexing'}
+                                    </button>
+                                </>
+                            )}
+                            {status?.project_loaded && (
+                                <button
+                                    onClick={handleReset} disabled={ingesting}
+                                    title="Wipe Index"
+                                    className="p-2.5 border border-red-200 text-red-600 rounded-xl hover:bg-red-50 hover:text-red-700 disabled:opacity-40 transition-colors"
+                                >
+                                    <Trash2 className="w-4 h-4" />
+                                </button>
+                            )}
+                        </div>
+
+                    </div>
+                </div>
+
+                {/* RIGHT PANEL: Folder Tree Preview */}
+                <div className="w-full md:w-1/2 lg:w-[45%] bg-white border border-industrial-200 rounded-2xl flex flex-col shadow-sm overflow-hidden">
+                    <div className="px-5 py-4 border-b border-industrial-100 bg-industrial-50 flex items-center justify-between">
+                        <h3 className="text-sm font-bold text-industrial-800 flex items-center gap-2">
+                            <FolderOpen className="w-4 h-4 text-industrial-500" />
+                            Indexed Directory Explorer
+                        </h3>
+                        <span className="text-xs font-mono text-industrial-400 bg-industrial-200/50 px-2 py-0.5 rounded">
+                            /api/project/files
+                        </span>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-3">
+                        {filesTree.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-center p-6 grayscale opacity-60">
+                                <Frown className="w-10 h-10 text-industrial-300 mb-3" />
+                                <p className="text-sm font-bold text-industrial-500">No project source data.</p>
+                                <p className="text-xs text-industrial-400 max-w-[200px] mt-1">Upload a directory containing PDFs, Excel sheets, and L5X components to see the hybrid searchable tree here.</p>
+                            </div>
+                        ) : (
+                            <div className="space-y-0.5 pl-1">
+                                {filesTree.map((node, i) => (
+                                    <FolderTreeNode key={`${node.name}-${i}`} node={node} level={0} />
+                                ))}
+                            </div>
                         )}
                     </div>
-
-                    {/* ── RIGHT PANEL: File Tree Preview ── */}
-                    <div className="bg-white border border-industrial-200 rounded-2xl shadow-sm h-full flex flex-col overflow-hidden max-h-[calc(100vh-140px)]">
-                        <div className="px-5 py-4 border-b border-industrial-100 bg-industrial-50/50 flex flex-col gap-1 shrink-0">
-                            <h3 className="text-sm font-semibold text-industrial-800 flex items-center gap-2">
-                                <FolderSearch className="w-4 h-4 text-industrial-500" />
-                                Index Directory Explorer
-                            </h3>
-                            <p className="text-xs text-industrial-400">Successfully indexed files mapping to the Vector DB.</p>
-                        </div>
-                        <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-                            {fileTree ? (
-                                <FileTreeNode node={{ name: fileTree.root, type: "folder", children: fileTree.children, path: "/" }} />
-                            ) : (
-                                <div className="h-full flex flex-col items-center justify-center text-industrial-300 gap-3">
-                                    <FileCog className="w-12 h-12 opacity-50" />
-                                    <p className="text-sm font-medium">No files indexed in workspace</p>
-                                </div>
-                            )}
-                        </div>
-                    </div>
-
                 </div>
+
             </div>
         </div>
     );
 };
+
 
 // ── Settings Page ──────────────────────────────────────────────────────────────
-export const SettingsPage = () => {
-    return (
-        <div className="p-6 max-w-3xl space-y-6 overflow-y-auto h-full mx-auto">
-            <div>
-                <h2 className="text-2xl font-bold text-industrial-800">System Configuration</h2>
-                <p className="text-sm text-industrial-400 mt-1">Global platform settings and connection parameters.</p>
+export const SettingsPage = () => (
+    <div className="p-8">
+        <h2 className="text-2xl font-bold text-industrial-800 mb-4">System Settings</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="bg-white p-6 rounded-xl border border-industrial-200 shadow-sm">
+                <h3 className="text-sm font-bold text-industrial-800 mb-2 flex items-center gap-2"><Cpu className="w-4 h-4 text-blue-500" /> Language Model Engine</h3>
+                <p className="text-sm text-industrial-500 mb-1">Provider: <strong>Ollama Native</strong></p>
+                <p className="text-sm text-industrial-500">Current Base: <strong>mistral</strong></p>
             </div>
-
-            <section className="bg-white border border-industrial-200 rounded-2xl p-6 space-y-6 shadow-sm">
-
-                {/* LM Endpoint */}
-                <div className="space-y-3">
-                    <div className="flex items-center gap-2 text-industrial-800 font-semibold mb-1">
-                        <Brain className="w-4 h-4 text-primary-600" />
-                        Language Model (Ollama)
-                    </div>
-                    <label className="text-xs font-medium text-industrial-500 uppercase tracking-widest">Base API URL</label>
-                    <input type="text" disabled value="http://localhost:11434" className="w-full border border-industrial-200 rounded-xl px-4 py-2.5 text-sm bg-industrial-50 text-industrial-500 font-mono cursor-not-allowed" />
-                    <p className="text-xs text-industrial-400">Native mapping detected automatically by backend integration.</p>
-                </div>
-
-                <div className="h-px bg-industrial-100 my-2" />
-
-                {/* Vector DB Endpoint */}
-                <div className="space-y-3">
-                    <div className="flex items-center gap-2 text-industrial-800 font-semibold mb-1">
-                        <Server className="w-4 h-4 text-primary-600" />
-                        Vector Store (Qdrant)
-                    </div>
-                    <label className="text-xs font-medium text-industrial-500 uppercase tracking-widest">Base API URL</label>
-                    <input type="text" disabled value="http://localhost:6333" className="w-full border border-industrial-200 rounded-xl px-4 py-2.5 text-sm bg-industrial-50 text-industrial-500 font-mono cursor-not-allowed" />
-                </div>
-
-                <div className="h-px bg-industrial-100 my-2" />
-
-                <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-xl text-yellow-700 text-sm">
-                    <strong>Note:</strong> Project-specific knowledge base indexing has been moved to the <b>Project Info</b> tab.
-                </div>
-
-            </section>
+            <div className="bg-white p-6 rounded-xl border border-industrial-200 shadow-sm">
+                <h3 className="text-sm font-bold text-industrial-800 mb-2 flex items-center gap-2"><Database className="w-4 h-4 text-rose-500" /> Vector Database</h3>
+                <p className="text-sm text-industrial-500 mb-1">Provider: <strong>Qdrant Local</strong></p>
+                <p className="text-sm text-industrial-500">Endpoint: <strong>localhost:6333</strong></p>
+            </div>
         </div>
-    );
-};
+        <p className="text-xs text-industrial-400 mt-6">Project-specific index configurations have been securely migrated to the Project Information tab.</p>
+    </div>
+);

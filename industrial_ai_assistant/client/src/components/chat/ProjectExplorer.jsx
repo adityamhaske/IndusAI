@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ChevronRight, ChevronDown, File, Folder, Database, Filter } from 'lucide-react';
 import useAppStore from '../../store/useAppStore';
-import { getProjectFiles } from '../../api/knowledgeApi';
+import { getProjectFiles } from '../../services/knowledgeApi';
 
 // Recursive Tree Node
 const TreeNode = ({ node, selectedFiles, selectedFolders, onToggleFile, onToggleFolder }) => {

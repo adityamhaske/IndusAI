@@ -44,7 +44,6 @@ from app.models.project_models import (
 )
 from app.services import query_classifier
 from app.services.project_context_manager import get_project_context_manager
-from app.services.prompt_builder import PROMPT_VERSION, build as build_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +124,7 @@ class QueryOrchestrator:
                     confidence="LOW",
                     warnings=["STRICT mode active but no matching files found in index."],
                     context_scope=context_scope_meta,
-                    prompt_version=PROMPT_VERSION,
+                    prompt_version="v3.0.0",
                 )
 
         # ── Fast-Path: File Explanation ─────────────────────────────────────────
@@ -195,10 +194,8 @@ class QueryOrchestrator:
             context_scope_meta["used_chunks"] = len(semantic_hits)
 
         # ── Step 5: Merge contexts ───────────────────────────────────────────
-        # (Lists are passed separately to PromptBuilder)
-
         # ── Step 6: Build prompt ──────────────────────────────────────────────
-        prompt, is_truncated, used_chunks = build_prompt(
+        prompt, is_truncated, used_chunks = _build_prompt(
             question=request.question,
             intent_labels=[l.value for l in intent.labels],
             structured_hits=structured_hits,
@@ -210,7 +207,12 @@ class QueryOrchestrator:
 
         # ── Step 7: LLM call ──────────────────────────────────────────────────
         t_llm = time.perf_counter()
-        raw_response = _call_llm(prompt)
+        
+        prompt_len = len(prompt)
+        doc_len = sum(len(d.chunk.content) for d in semantic_hits) + sum(len(str(h.data)) for h in structured_hits)
+        retrieval_coverage_score = (doc_len / prompt_len) if prompt_len > 0 else 0.0
+        
+        raw_response = _call_llm(prompt, retrieval_coverage_score=retrieval_coverage_score)
         llm_ms = (time.perf_counter() - t_llm) * 1000
 
         # ── Step 8: Parse + validate schema ──────────────────────────────────
@@ -282,7 +284,7 @@ class QueryOrchestrator:
             answer=answer_json,
             confidence=confidence,
             hallucinated_tags_removed=hallucinated,
-            prompt_version=PROMPT_VERSION,
+            prompt_version="v3.0.0",
             llm_latency_ms=round(llm_ms, 1),
             total_latency_ms=round(total_ms, 1),
             warnings=warnings,
@@ -335,12 +337,20 @@ def _structured_lookup(query: str, intent, si) -> list[StructuredHit]:
 
 # ── LLM call ─────────────────────────────────────────────────────────────────
 
-def _call_llm(prompt: str) -> str:
-    """Call OllamaLLM.generate(). Raises LLMConnectionError if unreachable."""
-    from app.llm.ollama_llm import OllamaLLM
-    from app.config.settings import settings
-    llm = OllamaLLM(base_url=settings.OLLAMA_BASE_URL, model=settings.OLLAMA_MODEL)
-    return llm.generate(prompt)
+def _call_llm(prompt: str, retrieval_coverage_score: float = 0.0) -> str:
+    """Call AIGatewayService.execute(). Raises LLMConnectionError if unreachable."""
+    from app.config.dependency_injection import get_container
+    from app.models.ai_models import AIRequest
+    from app.core.llm_exceptions import LLMConnectionError
+
+    gateway = get_container().ai_gateway
+    req = AIRequest(prompt=prompt, response_format="json")
+    res = gateway.execute(req, retrieval_coverage_score=retrieval_coverage_score)
+    
+    if not res.success:
+        raise LLMConnectionError(f"AIGateway Error: {res.error}")
+        
+    return res.raw_output
 
 
 def _parse_llm_output(raw: str) -> dict:
@@ -434,12 +444,40 @@ def _detect_hallucinated_tags(text: str, known_tags_lower: frozenset[str]) -> li
     for cand in candidates:
         cand_lower = cand.lower()
         if cand_lower in known_tags_lower:
+
             continue   # exact match — OK
         if _fuzzy_match(cand_lower, known_tags_lower):
             continue   # close enough — OK
         hallucinated.append(cand)
 
     return hallucinated
+
+
+def _build_prompt(question: str, intent_labels: list[str], structured_hits: list[StructuredHit], semantic_chunks: list[ScoredChunk], intent_type: str) -> tuple[str, bool, int]:
+    """Inlines the context bounds and assembles the LLM grounding prompt natively."""
+    base_sys = "You are an expert Industrial AI assistant. Use the provided context to answer exactly in JSON."
+    
+    context_parts = []
+    if structured_hits:
+        context_parts.append("STRUCTURED PLATOON:\n" + "\n".join(str(h.data) for h in structured_hits))
+    
+    # Very crude token limit for safety (3000 chars roughly proxy for tokens for fast fallback)
+    budget = 12000 
+    used_chunks = 0
+    current_len = len(base_sys) + len(question)
+    
+    for c in semantic_chunks:
+        chunk_len = len(c.chunk.content)
+        if current_len + chunk_len > budget:
+            break
+        context_parts.append(f"Source: {c.chunk.source_file}\nContent: {c.chunk.content}")
+        current_len += chunk_len
+        used_chunks += 1
+        
+    full_str = f"{base_sys}\n\nCONTEXT:\n" + "\n---\n".join(context_parts) + f"\n\nQUESTION: {question}"
+    is_truncated = used_chunks < len(semantic_chunks)
+    
+    return full_str, is_truncated, used_chunks
 
 
 def _fuzzy_match(candidate: str, known: frozenset[str], threshold: float = _FUZZY_THRESHOLD) -> bool:

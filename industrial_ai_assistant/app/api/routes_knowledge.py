@@ -36,7 +36,6 @@ from app.core.project_exceptions import (
 )
 from app.indexes.structured_index import get_structured_index
 from app.services.project_context_manager import get_project_context_manager
-from app.services.prompt_builder import PROMPT_VERSION
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/knowledge", tags=["Knowledge"])
@@ -75,7 +74,7 @@ class KnowledgeQueryResponse(BaseModel):
     structured_hits: list[StructuredHitOut] = Field(default_factory=list)
     documentation_sources: list[str] = Field(default_factory=list)
     confidence: str = "LOW"
-    prompt_version: str = PROMPT_VERSION
+    prompt_version: str = Field(default="v3.0.0")
     hallucinated_tags_removed: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     context_scope: dict[str, Any] = Field(default_factory=dict)
@@ -210,7 +209,7 @@ def _route_legacy_rag(body: KnowledgeQueryRequest, t_start: float) -> KnowledgeQ
 
         logger.info(
             "[legacy_rag] KNOWLEDGE mode=LEGACY_RAG confidence=%.2f prompt_v=%s",
-            result.confidence_score, PROMPT_VERSION,
+            result.confidence_score, "v3.0.0",
         )
 
         confidence = _float_to_confidence(result.confidence_score)
@@ -223,7 +222,7 @@ def _route_legacy_rag(body: KnowledgeQueryRequest, t_start: float) -> KnowledgeQ
             structured_hits=[],
             documentation_sources=list(result.source_sections),
             confidence=confidence,
-            prompt_version=PROMPT_VERSION,
+            prompt_version="v3.0.0",
             warnings=["No project indexed — answers are based on general documentation only."],
             llm_latency_ms=round(llm_ms, 1),
             total_latency_ms=round(total_ms, 1),
@@ -243,7 +242,7 @@ def _route_legacy_rag(body: KnowledgeQueryRequest, t_start: float) -> KnowledgeQ
                 "To get full PLC-level answers: go to Settings → select your project folder → click Index Project."
             ),
             confidence="LOW",
-            prompt_version=PROMPT_VERSION,
+            prompt_version="v3.0.0",
             warnings=[
                 "Legacy RAG unavailable — vector store may need initialization.",
                 f"Technical detail: {str(exc)[:120]}",

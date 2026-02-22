@@ -44,10 +44,15 @@ class FaultResponseValidator:
             warnings.append("LLM returned no primary action.")
 
         # ── 2. Tag hallucination check ─────────────────
-        # Note: the new schema removed the explicit `related_plc_tags` list, so we skip the explicit list filtering
-        # and instead rely on the orchestrator's generic hallucination scanner if implemented.
-        # But for backward compatibility with the validator contract:
-        pass
+        if known_tags and "related_plc_tags" in output.metrics:
+            raw_tags = output.metrics["related_plc_tags"]
+            valid_tags = []
+            for tag in raw_tags:
+                if tag in known_tags:
+                    valid_tags.append(tag)
+                else:
+                    hallucinated.append(tag)
+            output.metrics["related_plc_tags"] = valid_tags
 
         # ── 3. Truncate overly long free-text fields ──────────────────────────
         if len(output.diagnosis) > 1000:

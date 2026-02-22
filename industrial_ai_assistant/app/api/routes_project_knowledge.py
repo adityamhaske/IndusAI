@@ -182,7 +182,7 @@ def project_files(project_id: str = Query(default="default")):
         pass
 
     if not files:
-        return {"root": project_id, "children": []}
+        return []
 
     try:
         common = os.path.commonpath(list(files))
@@ -238,17 +238,7 @@ def project_files(project_id: str = Query(default="default")):
         res.sort(key=lambda x: (0 if x["type"] == "folder" else 1, x["name"].lower()))
         return res
 
-    children = _to_list(tree_dict)
-    
-    # Try to extract a clean root name from the common path
-    root_name = project_id
-    if common:
-        root_name = os.path.basename(common) or project_id
-        
-    return {
-        "root": root_name,
-        "children": children
-    }
+    return _to_list(tree_dict)
 
 
 # ── GET /api/project/metrics ──────────────────────────────────────────────────
@@ -338,3 +328,4 @@ def project_reset(project_id: str = Query(default="default")):
 
     get_project_context_manager().reset(project_id)
     return {"status": "reset", "project_id": project_id}
+    

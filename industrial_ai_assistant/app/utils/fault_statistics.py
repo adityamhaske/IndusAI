@@ -170,15 +170,15 @@ def compute_fault_burst(
 # ── Advanced Metrics & Trend (v3) ─────────────────────────────────────────────
 
 def compute_rolling_metrics(
-    timestamps: List[datetime], reference_ts: datetime
-) -> Tuple[float, float, float, float]:
+    timestamps: List[datetime], reference_ts: datetime, min_sample_threshold: int = 5
+) -> Tuple[float, float, float, Optional[float]]:
     """
     Computes rolling averages and deltas for trend calculation.
     Returns:
         rolling_avg_5m: Average occurrences per 5-minute block over the last hour.
         rolling_avg_1h: Average occurrences per hour over the last 24 hours.
         delta_last_30m: Difference between the last 30m count and the expected 30m average (based on 1h average).
-        anomaly_score: A simple ratio-based score if occurrences greatly exceed the rolling average.
+        anomaly_score: A simple ratio-based score if occurrences greatly exceed the rolling average. Returns None if sample size is too sparse.
     """
     if not timestamps:
         return 0.0, 0.0, 0.0, 0.0
@@ -199,46 +199,55 @@ def compute_rolling_metrics(
     delta_last_30m = occ_30m - expected_30m
 
     # Score: How many times greater is the 1h count than the historical 1h average?
-    anomaly_score = (occ_1h / rolling_avg_1h) if rolling_avg_1h > 0 else (float(occ_1h) if occ_1h > 2 else 0.0)
+    # L9 Correction: Add sample-size gating to avoid mathematically correct but semantically wrong anomalies
+    if occ_1h < min_sample_threshold:
+        anomaly_score = None
+    else:
+        anomaly_score = (occ_1h / rolling_avg_1h) if rolling_avg_1h > 0 else (float(occ_1h) if occ_1h > 2 else 0.0)
 
     return rolling_avg_5m, rolling_avg_1h, delta_last_30m, anomaly_score
 
 
-def compute_trend(delta_last_30m: float, rolling_avg_1h: float) -> str:
+def compute_trend(delta_last_30m: float, rolling_avg_1h: float, epsilon: float = 0.5) -> str:
     """
-    If delta_last_30m > 20% of expected 30m volume → RISING
-    If delta_last_30m < -20% → DECLINING
-    Else → STABLE
+    Computes trend using sign(rolling_avg_30m_rate - rolling_avg_1h) with a smoothing epsilon.
+    If absolute delta is strictly beneath epsilon, the trend defaults to STABLE representing noise.
     """
-    expected_30m = rolling_avg_1h / 2.0
-    if expected_30m == 0:
-        return "STABLE" if delta_last_30m == 0 else "RISING"
-
-    ratio = delta_last_30m / expected_30m
-    if ratio > 0.20:
+    # L9 Correction: trend = sign(rolling_avg_30m - rolling_avg_1h)
+    # rolling_avg_30m_hourly_rate = occ_30m * 2
+    # rolling_avg_1h = expected_30m * 2
+    # So hourly_rate_difference = 2 * delta_last_30m
+    delta_hourly_rate = 2.0 * delta_last_30m
+    
+    if abs(delta_hourly_rate) < epsilon:
+        return "STABLE"
+    elif delta_hourly_rate > 0:
         return "RISING"
-    elif ratio < -0.20:
+    else:
         return "DECLINING"
-    return "STABLE"
 
 
 def check_metric_integrity(
     burst_detected: bool,
     burst_count: int,
-    occurrences_1h: int
+    occurrences_1h: int,
+    anomaly_score: Optional[float] = 0.0
 ) -> bool:
     """
     Validates statistical integrity before trusting values to the LLM.
+    - If anomaly_score is None, sample trace is beneath MIN_SAMPLE_THRESHOLD.
     - If burst detected, the 1H occurrences MUST be at least the burst count.
     - If burst detected but 1H occurrences is 0, data is corrupted/inconsistent.
     """
+    if anomaly_score is None:
+        logger.warning("Stat Integrity Warning: Sample size below threshold for statistical convergence.")
+        return False
+
     if burst_detected:
         if occurrences_1h == 0:
             logger.error("Stat Integrity Error: Burst detected but occurrences_1h is 0.")
             return False
         if occurrences_1h < burst_count:
-            # Note: Depending on the reference_ts for the 1h calculation vs the global burst,
-            # this might drift slightly, but in a strict commissioned system, we expect total 1H >= recent burst.
             logger.warning("Stat Integrity Warning: occurrences_1h < burst_count.")
     return True
 

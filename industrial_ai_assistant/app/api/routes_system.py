@@ -5,6 +5,7 @@ Mounted at /api/system/health by main.py.
 import logging
 from fastapi import APIRouter
 from app.services.system_health_service import get_health_service
+from app.config.version import get_system_versions
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -25,3 +26,10 @@ def system_health():
         result["rag_connected"], result["vector_store_connected"]
     )
     return result
+
+@router.get("/version", tags=["System"])
+def system_version():
+    """
+    Expose immutable release version mappings for CI/CD tracking.
+    """
+    return get_system_versions()

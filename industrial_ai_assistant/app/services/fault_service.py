@@ -297,7 +297,12 @@ class FaultService:
             co_fault, co_count = compute_cooccurrence(df, ref_ts)
             burst = ds.stats_cache.get("burst_detected", False)
             burst_desc = ds.stats_cache.get("burst_description", "")
-            confidence = compute_confidence(occ_1h, burst, occ_24h)
+            confidence = compute_confidence(
+                burst_detected=burst,
+                anomaly_score=1.0,
+                integrity_passed=True,
+                occurrences_1h=occ_1h
+            )
 
             prompt = _build_analysis_prompt(record, occ_1h, occ_24h, co_fault, burst_desc)
 

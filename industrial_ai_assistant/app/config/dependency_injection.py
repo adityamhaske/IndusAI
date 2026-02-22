@@ -2,15 +2,16 @@ from functools import lru_cache
 from app.config.settings import settings
 
 # Interfaces
-from app.core.interfaces.llm_interface import LLMInterface
 from app.core.interfaces.embedding_interface import EmbeddingInterface
 from app.core.interfaces.vector_store_interface import VectorStoreInterface
 from app.core.interfaces.retriever_interface import RetrieverInterface
 from app.core.interfaces.chunker_interface import ChunkerInterface
 
 # Implementations
-from app.llm.ollama_llm import OllamaLLM
-from app.llm.mock_llm import MockLLM
+from app.ai_providers.local_ollama_provider import LocalOllamaProvider
+from app.ai_providers.openai_provider import OpenAIProvider
+from app.ai_providers.gemini_provider import GeminiProvider
+from app.services.ai_gateway import AIGatewayService, FallbackPolicy
 from app.embeddings.sentence_transformer_embedder import SentenceTransformerEmbedder
 from app.embeddings.mock_embedder import MockEmbedder
 from app.vector_store.qdrant_store import QdrantStore
@@ -24,12 +25,11 @@ from app.ingestion.ingestion_manager import IngestionManager
 from app.ingestion.processors import PDFProcessor, L5XProcessor, ExcelProcessor
 from app.storage.sqlite_client import SQLiteClient
 
-from app.services.chat_service import ChatService
 from app.services.validation_service import ValidationService
 from app.services.history_service import HistoryService
 from app.services.log_service import LogService
 from app.services.project_service import ProjectService
-from app.services.evaluation_service import EvaluationService
+
 from app.services.rag_service import RAGService
 from app.services.fault_response_validator import FaultResponseValidator
 from app.services.fault_analysis_orchestrator import FaultAnalysisOrchestrator
@@ -54,11 +54,36 @@ class Container:
         else:
             self._vector_store = InMemoryStore()
             
-        # 3. LLM
+        # 3. AI Gateway (replaces raw LLMInterface)
+        providers = {}
         if settings.LLM_PROVIDER == "ollama":
-            self._llm = OllamaLLM(base_url=settings.OLLAMA_BASE_URL, model=settings.OLLAMA_MODEL)
+            providers["local"] = LocalOllamaProvider(base_url=settings.OLLAMA_BASE_URL, model=settings.OLLAMA_MODEL)
         else:
-            self._llm = MockLLM()
+            providers["local"] = LocalOllamaProvider(base_url="http://mock", model="mock")
+            
+        if settings.ENABLE_CLOUD_PROVIDERS:
+            # Inject securely mapped environment secrets
+            if settings.OPENAI_API_KEY:
+                providers["openai"] = OpenAIProvider(api_key=settings.OPENAI_API_KEY)
+            if settings.GEMINI_API_KEY:
+                providers["gemini"] = GeminiProvider(api_key=settings.GEMINI_API_KEY)
+                
+        # Canary deployment: define the fallback route
+        policy = FallbackPolicy(
+            primary="local",
+            secondary="openai" if "openai" in providers else None,
+            timeout_ms=5000,
+            json_enforced=True
+        )
+        
+        self._llm_gateway = AIGatewayService(
+            providers=providers,
+            fallback_policy=policy,
+            failure_rate_threshold=0.5,
+            window_seconds=60,
+            max_daily_cost_usd=settings.MAX_DAILY_COST_USD,
+            enable_speculative_fallback=settings.ENABLE_SPECULATIVE_FALLBACK
+        )
             
         # 4. Retrieval
         self._keyword_retriever = KeywordSearch()
@@ -81,19 +106,9 @@ class Container:
             
         # 5. Services
         self._validator = ValidationService()
-        self._chat_service = ChatService(
-            llm=self._llm,
-            retriever=self._retriever,
-            validator=self._validator,
-            db_client=self._db_client
-        )
         self._history_service = HistoryService(db_client=self._db_client)
         self._log_service = LogService(db_client=self._db_client)
         self._project_service = ProjectService(db_client=self._db_client)
-        self._evaluation_service = EvaluationService(
-            chat_service=self._chat_service,
-            golden_dataset_path=settings.GOLDEN_DATASET_PATH
-        )
         
         # 6. Ingestion
         self._chunker = SemanticChunker() # Default to semantic
@@ -112,15 +127,15 @@ class Container:
         self._rag_service = RAGService(retriever=self._retriever)
         self._fault_response_validator = FaultResponseValidator()
         self._fault_orchestrator = FaultAnalysisOrchestrator(
-            llm=self._llm,
+            llm=self._llm_gateway,
             rag_service=self._rag_service,
             validator=self._fault_response_validator,
         )
 
     # Accessors
     @property
-    def chat_service(self) -> ChatService:
-        return self._chat_service
+    def ai_gateway(self) -> AIGatewayService:
+        return self._llm_gateway
         
     @property
     def history_service(self) -> HistoryService:
@@ -133,10 +148,6 @@ class Container:
     @property
     def project_service(self) -> ProjectService:
         return self._project_service
-        
-    @property
-    def evaluation_service(self) -> EvaluationService:
-        return self._evaluation_service
         
     @property
     def ingestion_manager(self) -> IngestionManager:

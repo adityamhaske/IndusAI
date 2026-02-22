@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useCallback } from 'react';
 import { Loader2, Zap, Database, AlertTriangle } from 'lucide-react';
-import { queryKnowledge, getProjectStatus } from '../api/knowledgeApi';
+import { queryKnowledge, getProjectStatus } from '../services/knowledgeApi';
 import useAppStore from '../store/useAppStore';
 import AnswerCard from '../components/chat/AnswerCard';
 import ProjectExplorer from '../components/chat/ProjectExplorer';
