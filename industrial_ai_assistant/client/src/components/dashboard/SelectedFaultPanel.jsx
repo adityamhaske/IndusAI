@@ -137,7 +137,11 @@ const SelectedFaultPanel = ({ fault, detail, analysis, analysisError, systemStat
                         )}
                         {analysisError && (
                             <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-md p-3">
-                                <strong>Error:</strong> {analysisError.message || 'Analysis failed'}
+                                <strong>Error:</strong> {
+                                    (analysisError.message || '').includes("Provider") && (analysisError.message || '').includes("is not configured")
+                                        ? "Selected AI provider is not activated. Please verify API key and provider configuration in Settings."
+                                        : analysisError.message || 'Analysis failed'
+                                }
                             </div>
                         )}
                     </div>

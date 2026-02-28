@@ -10,6 +10,7 @@ class AIRequest(BaseModel):
     response_format: str = Field(default="text", description="'text' or 'json'")
     json_schema: Optional[Dict[str, Any]] = Field(default=None, description="Schema definition if response_format is json")
     timeout_ms: int = Field(default=30000, description="Timeout threshold in milliseconds")
+    intent_type: Optional[str] = Field(default=None, description="The classified intent of the query for routing via heuristic")
 
 class AIResponse(BaseModel):
     """Normalized output returned from any AI Provider."""

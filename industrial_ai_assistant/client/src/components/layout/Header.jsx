@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Cpu, WifiOff, RefreshCw, Database, RotateCcw } from 'lucide-react';
+import { Cpu, WifiOff, RefreshCw, Database, RotateCcw, ShieldCheck } from 'lucide-react';
 import systemApi from '../../services/systemApi';
 import { getProjectStatus } from '../../services/knowledgeApi';
 import useAppStore from '../../store/useAppStore';
@@ -42,6 +42,11 @@ const Header = ({ title }) => {
     const qdrantOk = health?.vector_store_connected;
     const loaded = knowledgeStatus?.project_loaded;
 
+    // Cloud provider indicators derived from AI health payload
+    const registeredProviders = health?.registered_providers || [];
+    const openaiActive = registeredProviders.includes('openai');
+    const geminiActive = registeredProviders.includes('gemini');
+
     const getActiveMode = (h) => {
         if (!h || !h.primary_provider) return null;
         if (h.primary_provider.includes('local') && (!h.secondary_provider || h.secondary_provider === 'none')) {
@@ -71,6 +76,17 @@ const Header = ({ title }) => {
                     <span className={`w-1.5 h-1.5 rounded-full ${loaded ? 'bg-green-500' : 'bg-yellow-500'}`} />
                     {loaded ? 'PROJECT' : 'GENERAL'}
                 </div>
+                {/* System state */}
+                {health !== null && (
+                    <div className={`hidden lg:flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border font-bold flex-shrink-0 ${!llmOk ? 'bg-red-50 text-red-700 border-red-200'
+                        : !loaded ? 'bg-yellow-50 text-yellow-700 border-yellow-200'
+                            : 'bg-green-50 text-green-700 border-green-200'
+                        }`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${!llmOk ? 'bg-red-500 animate-pulse' : !loaded ? 'bg-yellow-500' : 'bg-green-500'
+                            }`} />
+                        {!llmOk ? 'AI DISCONNECTED' : !loaded ? 'NOT INDEXED' : 'READY'}
+                    </div>
+                )}
             </div>
 
             {/* Right */}
@@ -87,6 +103,21 @@ const Header = ({ title }) => {
                     <Cpu className="w-3 h-3" />
                     {llmLabel(health)}
                 </div>
+                {/* Cloud Provider Indicators */}
+                {openaiActive && (
+                    <div className="hidden lg:flex items-center gap-1.5 text-xs text-industrial-600">
+                        <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                        <ShieldCheck className="w-3 h-3 text-green-600" />
+                        <span>OpenAI</span>
+                    </div>
+                )}
+                {geminiActive && (
+                    <div className="hidden lg:flex items-center gap-1.5 text-xs text-industrial-600">
+                        <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                        <ShieldCheck className="w-3 h-3 text-green-600" />
+                        <span>Gemini</span>
+                    </div>
+                )}
                 <div className={`hidden md:flex items-center gap-1.5 text-xs ${qdrantOk ? 'text-industrial-600' : 'text-red-500'}`}>
                     <span className={`w-1.5 h-1.5 rounded-full ${qdrantOk ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />
                     <Database className="w-3 h-3" />

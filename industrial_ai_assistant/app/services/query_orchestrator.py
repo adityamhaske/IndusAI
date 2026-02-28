@@ -240,22 +240,6 @@ class QueryOrchestrator:
             
         confidence = validated_model.confidence
 
-        # ── AUDIT 1: Raw Output Audit ──
-        logger.info(
-            "PHASE13_AUDIT: raw_len=%d, parsed_len=%d, diagnosis_len=%d, "
-            "action_len=%d, tokens_prompt=%d, completion_len=%d, "
-            "retrieval_chunks=%d, coverage=%.2f, raw_valid=%s",
-            len(raw_response),
-            len(json.dumps(parsed_dict)),
-            len(parsed_dict.get("summary", parsed_dict.get("explanation", ""))),
-            len(str(parsed_dict.get("recommended_actions", ""))),
-            prompt_len // 4,
-            len(raw_response) // 4,
-            len(semantic_hits) + len(structured_hits),
-            retrieval_coverage_score,
-            parsed_dict.get("_raw_valid", False)
-        )
-
         # ── Step 9: Hallucination guard (runs on main text fields) ───────────
         known_tags = si.all_tag_names_lower()
         
@@ -354,7 +338,8 @@ def _structured_lookup(query: str, intent, si) -> list[StructuredHit]:
 # ── LLM call ─────────────────────────────────────────────────────────────────
 
 def _call_llm(prompt: str, retrieval_coverage_score: float = 0.0) -> str:
-    """Call AIGatewayService.execute(). Raises LLMConnectionError if unreachable."""
+    """Call AIGatewayService.execute(). Returns raw LLM output text.
+    Raises LLMConnectionError with sanitized user-facing message."""
     from app.config.dependency_injection import get_container
     from app.models.ai_models import AIRequest
     from app.core.llm_exceptions import LLMConnectionError
@@ -364,7 +349,12 @@ def _call_llm(prompt: str, retrieval_coverage_score: float = 0.0) -> str:
     res = gateway.execute(req, retrieval_coverage_score=retrieval_coverage_score)
     
     if not res.success:
-        raise LLMConnectionError(f"AIGateway Error: {res.error}")
+        # NEVER expose raw gateway internals to the user
+        logger.error("AIGateway returned failure: %s", res.error)
+        raise LLMConnectionError(
+            "AI service is currently unable to process your request. "
+            "Please check provider configuration in Settings."
+        )
         
     return res.raw_output
 
@@ -470,18 +460,80 @@ def _detect_hallucinated_tags(text: str, known_tags_lower: frozenset[str]) -> li
 
 
 def _build_prompt(question: str, intent_labels: list[str], structured_hits: list[StructuredHit], semantic_chunks: list[ScoredChunk], intent_type: str) -> tuple[str, bool, int]:
-    """Inlines the context bounds and assembles the LLM grounding prompt natively."""
-    base_sys = "You are an expert Industrial AI assistant. Use the provided context to answer exactly in JSON."
-    
+    """Assembles an intent-aware LLM prompt with context bounds and schema instructions."""
+
+    # ── Intent-specific system prompts ────────────────────────────────────
+    _SYSTEM_PROMPTS = {
+        "FAULT_ANALYSIS": (
+            "You are an expert Industrial PLC fault diagnostics engineer. "
+            "Analyze the fault using ONLY the provided context data. "
+            "Respond ONLY in the following JSON schema:\n"
+            '{\n  "summary": "<Concise root cause analysis, max 3 lines>",\n'
+            '  "root_causes": ["<cause1>", "<cause2>"],\n'
+            '  "recommended_actions": ["<action1>", "<action2>"],\n'
+            '  "supporting_evidence": ["<evidence from context>"],\n'
+            '  "limitations": ["<any knowledge gaps>"],\n'
+            '  "confidence": "HIGH|MEDIUM|LOW"\n}'
+        ),
+        "FILE_EXPLANATION": (
+            "You are an expert Industrial Automation engineer. "
+            "Provide a comprehensive technical explanation of the file content below. "
+            "Cover: purpose, key components, logic flow, and connections to other system elements. "
+            "Respond ONLY in the following JSON schema:\n"
+            '{\n  "summary": "<Detailed technical explanation>",\n'
+            '  "root_causes": [],\n'
+            '  "recommended_actions": ["<engineering recommendations>"],\n'
+            '  "supporting_evidence": ["<specific references from the file>"],\n'
+            '  "limitations": [],\n'
+            '  "confidence": "HIGH|MEDIUM|LOW"\n}'
+        ),
+        "DOCUMENT_SUMMARY": (
+            "You are an expert technical documentation analyst for industrial control systems. "
+            "Provide a thorough summary covering all key topics, components, and relationships described in the context. "
+            "Be comprehensive — the user wants to understand the full scope. "
+            "Respond ONLY in the following JSON schema:\n"
+            '{\n  "summary": "<Comprehensive multi-paragraph summary>",\n'
+            '  "root_causes": [],\n'
+            '  "recommended_actions": ["<key takeaways>"],\n'
+            '  "supporting_evidence": ["<specific details from documents>"],\n'
+            '  "limitations": ["<what is NOT covered>"],\n'
+            '  "confidence": "HIGH|MEDIUM|LOW"\n}'
+        ),
+    }
+    _DEFAULT_SYSTEM = (
+        "You are an expert Industrial AI assistant for PLC and automation systems. "
+        "Answer the question thoroughly using the provided context. "
+        "Respond ONLY in the following JSON schema:\n"
+        '{\n  "summary": "<Clear, complete answer>",\n'
+        '  "root_causes": [],\n'
+        '  "recommended_actions": ["<actionable suggestions>"],\n'
+        '  "supporting_evidence": ["<references from context>"],\n'
+        '  "limitations": ["<any gaps>"],\n'
+        '  "confidence": "HIGH|MEDIUM|LOW"\n}'
+    )
+
+    base_sys = _SYSTEM_PROMPTS.get(intent_type, _DEFAULT_SYSTEM)
+
+    # ── Zero-chunk guard ──────────────────────────────────────────────────
+    if len(semantic_chunks) == 0 and len(structured_hits) == 0:
+        logger.warning("Zero retrieved context — injecting no-context instruction.")
+        base_sys += (
+            "\n\nIMPORTANT: No relevant context was retrieved from the project index. "
+            "If you cannot answer the question based on general knowledge alone, "
+            "state clearly: 'The indexed project does not contain information relevant to this query.' "
+            "Do NOT hallucinate specific PLC tags, routines, or file names."
+        )
+
+    # ── Build context ─────────────────────────────────────────────────────
     context_parts = []
     if structured_hits:
-        context_parts.append("STRUCTURED PLATOON:\n" + "\n".join(str(h.data) for h in structured_hits))
+        context_parts.append("STRUCTURED DATA:\n" + "\n".join(str(h.data) for h in structured_hits))
     
-    # Very crude token limit for safety (3000 chars roughly proxy for tokens for fast fallback)
-    budget = 12000 
+    budget = 24000  # Expanded from 12000 for better retrieval coverage
     used_chunks = 0
     current_len = len(base_sys) + len(question)
     
+    retrieval_scores = []
     for c in semantic_chunks:
         chunk_len = len(c.chunk.content)
         if current_len + chunk_len > budget:
@@ -489,9 +541,19 @@ def _build_prompt(question: str, intent_labels: list[str], structured_hits: list
         context_parts.append(f"Source: {c.chunk.source_file}\nContent: {c.chunk.content}")
         current_len += chunk_len
         used_chunks += 1
+        retrieval_scores.append(c.score)
         
-    full_str = f"{base_sys}\n\nCONTEXT:\n" + "\n---\n".join(context_parts) + f"\n\nQUESTION: {question}"
     is_truncated = used_chunks < len(semantic_chunks)
+    
+    # ── Debug logging ─────────────────────────────────────────────────────
+    avg_score = sum(retrieval_scores) / len(retrieval_scores) if retrieval_scores else 0.0
+    logger.info(
+        "[PromptBuilder] intent=%s retrieved_chunk_count=%d retrieval_score_avg=%.3f "
+        "prompt_char_count=%d truncated=%s",
+        intent_type, used_chunks, avg_score, current_len, is_truncated
+    )
+
+    full_str = f"{base_sys}\n\nCONTEXT:\n" + "\n---\n".join(context_parts) + f"\n\nQUESTION: {question}"
     
     return full_str, is_truncated, used_chunks
 

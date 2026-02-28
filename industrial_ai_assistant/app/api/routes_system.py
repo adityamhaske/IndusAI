@@ -68,25 +68,53 @@ def get_system_config() -> Dict[str, Any]:
 
 @router.post("/config", tags=["System"])
 def update_system_config(payload: AIConfigPayload):
+    from app.ai_providers.local_ollama_provider import LocalOllamaProvider
+    from app.ai_providers.openai_provider import OpenAIProvider
+    from app.ai_providers.gemini_provider import GeminiProvider
+    from app.services.ai_gateway import FallbackPolicy
+    from app.config.settings import settings
+    
     gateway = get_container().ai_gateway
     
-    gateway.policy.primary = payload.primary_provider
-    if payload.secondary_provider and payload.secondary_provider.lower() != "none":
-        gateway.policy.secondary = payload.secondary_provider
-    else:
-        gateway.policy.secondary = None
+    # 1. Rebuild Policy
+    new_policy = FallbackPolicy(
+        primary=payload.primary_provider,
+        secondary=payload.secondary_provider if payload.secondary_provider and payload.secondary_provider.lower() != "none" else None,
+        timeout_ms=payload.timeout_ms,
+        json_enforced=True
+    )
+    
+    # 2. Rebuild Providers Registry dynamically
+    new_providers = {}
+    new_providers["local_ollama"] = LocalOllamaProvider(base_url=settings.OLLAMA_BASE_URL, model=settings.OLLAMA_MODEL)
+    
+    if payload.openai_api_key and payload.openai_api_key.strip("* "):
+        new_providers["openai"] = OpenAIProvider(api_key=payload.openai_api_key)
+    elif "openai" in gateway.providers and getattr(gateway.providers["openai"], "api_key", None):
+        # Retain existing if not explicitly overwritten with blank
+        new_providers["openai"] = gateway.providers["openai"]
         
-    gateway.policy.timeout_ms = payload.timeout_ms
+    if payload.gemini_api_key and payload.gemini_api_key.strip("* "):
+        new_providers["gemini"] = GeminiProvider(api_key=payload.gemini_api_key)
+    elif "gemini" in gateway.providers and getattr(gateway.providers["gemini"], "api_key", None):
+        # Retain existing if not explicitly overwritten with blank
+        new_providers["gemini"] = gateway.providers["gemini"]
+
+    # 3. Persist API keys to OS environment for downstream validation probes
+    if payload.openai_api_key and payload.openai_api_key.strip('* '):
+        import os
+        os.environ['OPENAI_API_KEY'] = payload.openai_api_key
+    if payload.gemini_api_key and payload.gemini_api_key.strip('* '):
+        import os
+        os.environ['GEMINI_API_KEY'] = payload.gemini_api_key
+
+    # 4. Reload Gateway
+    gateway.reload_providers(new_providers, new_policy)
     gateway.enable_speculative_fallback = payload.speculative_fallback
     
-    if payload.openai_api_key and payload.openai_api_key.strip('* '):
-        openai_prov = gateway.providers.get("openai")
-        if openai_prov:
-            openai_prov.api_key = payload.openai_api_key
+    logger.info(
+        "Config saved. Active providers: %s | Primary: %s | Secondary: %s",
+        list(new_providers.keys()), new_policy.primary, new_policy.secondary
+    )
             
-    if payload.gemini_api_key and payload.gemini_api_key.strip('* '):
-        gemini_prov = gateway.providers.get("gemini")
-        if gemini_prov:
-            gemini_prov.api_key = payload.gemini_api_key
-            
-    return {"status": "success", "message": "Configuration updated successfully."}
+    return {"status": "success", "message": "Configuration updated successfully. Gateway registry reloaded."}

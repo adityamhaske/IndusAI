@@ -195,8 +195,6 @@ class StructuredIndex:
                 warnings=warnings,
             )
 
-    # ── Clear ─────────────────────────────────────────────────────────────────
-
     def clear(self) -> None:
         with self._lock:
             self._tags.clear()
@@ -206,6 +204,59 @@ class StructuredIndex:
             self._tag_name_cache = None
         logger.info("[%s] StructuredIndex cleared.", self.project_id)
 
+    def remove_file(self, source_file: str) -> None:
+        """Removes all records associated with a specific source file."""
+        with self._lock:
+            self._tags = {k: v for k, v in self._tags.items() if v.source_file != source_file}
+            self._routines = {k: v for k, v in self._routines.items() if v.source_file != source_file}
+            self._aois = {k: v for k, v in self._aois.items() if v.source_file != source_file}
+            self._io = {k: v for k, v in self._io.items() if v.source_file != source_file}
+            self._tag_name_cache = None
+        logger.info("[%s] Removed records for file '%s'.", self.project_id, source_file)
+
+    # ── Persistence ───────────────────────────────────────────────────────────
+
+    def save_to_disk(self, folder_path: str) -> None:
+        import json
+        from pathlib import Path
+        db = Path(folder_path) / ".indusai_structured.json"
+        with self._lock:
+            dump = {
+                "tags": {k: v.model_dump() for k, v in self._tags.items()},
+                "routines": {k: v.model_dump() for k, v in self._routines.items()},
+                "aois": {k: v.model_dump() for k, v in self._aois.items()},
+                "io": {k: v.model_dump() for k, v in self._io.items()},
+            }
+        try:
+            with open(db, "w", encoding="utf-8") as f:
+                json.dump(dump, f, indent=2)
+            logger.info("[%s] Saved StructuredIndex to disk.", self.project_id)
+        except Exception as e:
+            logger.error("[%s] Failed to save StructuredIndex: %s", self.project_id, e)
+
+    def load_from_disk(self, folder_path: str) -> bool:
+        import json
+        from pathlib import Path
+        from app.models.project_models import TagRecord, RoutineRecord, AOIRecord, IORecord
+        
+        db = Path(folder_path) / ".indusai_structured.json"
+        if not db.exists():
+            return False
+            
+        try:
+            with open(db, "r", encoding="utf-8") as f:
+                dump = json.load(f)
+            with self._lock:
+                self._tags = {k: TagRecord.model_validate(v) for k, v in dump.get("tags", {}).items()}
+                self._routines = {k: RoutineRecord.model_validate(v) for k, v in dump.get("routines", {}).items()}
+                self._aois = {k: AOIRecord.model_validate(v) for k, v in dump.get("aois", {}).items()}
+                self._io = {k: IORecord.model_validate(v) for k, v in dump.get("io", {}).items()}
+                self._tag_name_cache = None
+            logger.info("[%s] Loaded StructuredIndex from disk.", self.project_id)
+            return True
+        except Exception as e:
+            logger.warning("[%s] Failed to load StructuredIndex: %s", self.project_id, e)
+            return False
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

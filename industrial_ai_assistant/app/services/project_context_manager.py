@@ -180,6 +180,68 @@ class ProjectContextManager:
     def __init__(self):
         self._states: dict[str, _ProjectState] = {}
         self._global_lock = threading.Lock()
+        
+        # Load persisted config
+        self._config_file = Path.home() / ".indusai" / "active_projects.json"
+        self._load_persisted_projects()
+
+    def _load_persisted_projects(self) -> None:
+        """Hydrate project states based on global mapping cache."""
+        import json
+        from app.models.project_models import IndexMetadata
+        from app.indexes.structured_index import get_structured_index
+        from app.indexes.semantic_index import get_semantic_index
+
+        if not self._config_file.exists():
+            return
+            
+        try:
+            with open(self._config_file, "r") as f:
+                mappings = json.load(f)
+                
+            for pid, pfolder in mappings.items():
+                meta_path = Path(pfolder) / ".indusai_index.json"
+                if meta_path.exists():
+                    try:
+                        with open(meta_path, "r", encoding="utf-8") as mf:
+                            meta = IndexMetadata.model_validate_json(mf.read())
+                            
+                        # Validate Qdrant semantic integrity
+                        sem = get_semantic_index()
+                        if sem.collection_size(pid) > 0:
+                            # Load ram structure
+                            si = get_structured_index(pid)
+                            if si.load_from_disk(pfolder):
+                                # Reconstruct memory
+                                state = self._get_state(pid)
+                                state.folder = pfolder
+                                state.project_hash = meta.project_hash
+                                state.index_state = IndexState.READY
+                                
+                                import time
+                                from app.models.project_models import IngestionResult
+                                state.last_result = IngestionResult(
+                                    project_id=pid,
+                                    project_hash=meta.project_hash,
+                                    folder=pfolder,
+                                    files_indexed=len(meta.files),
+                                    duration_ms=0.0
+                                )
+                                logger.info("[%s] Successfully reconstructed project mapping from cache natively.", pid)
+                    except Exception as me:
+                        logger.warning("Metadata reconstruction failed for %s: %s", pid, me)
+        except Exception as e:
+            logger.warning("Could not read project config mapping: %s", e)
+
+    def _save_persisted_projects(self) -> None:
+        import json
+        self._config_file.parent.mkdir(parents=True, exist_ok=True)
+        mappings = {pid: state.folder for pid, state in self._states.items() if state.folder}
+        try:
+            with open(self._config_file, "w") as f:
+                json.dump(mappings, f, indent=2)
+        except Exception as e:
+            logger.error("Failed to save project mapping cache: %s", e)
 
     # ── State access ──────────────────────────────────────────────────────────
 
@@ -228,6 +290,7 @@ class ProjectContextManager:
             "[%s] Project set: resolved=%r hash=%s docker=%s",
             project_id, diag.resolved_path, new_hash[:8], IS_DOCKER,
         )
+        self._save_persisted_projects()
         return self.get_status(project_id)
 
     def mark_indexing(self, project_id: str) -> None:

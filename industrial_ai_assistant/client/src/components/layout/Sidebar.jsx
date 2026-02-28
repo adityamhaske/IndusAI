@@ -1,8 +1,11 @@
 import React from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useNavigate } from 'react-router-dom';
 import { MessageSquare, FileText, History, Settings, Box, PlusCircle } from 'lucide-react';
+import useAppStore from '../../store/useAppStore';
 
 const Sidebar = () => {
+    const navigate = useNavigate();
+    const resetChatSession = useAppStore(s => s.resetChatSession);
     const navItems = [
         { to: '/chat', icon: MessageSquare, label: 'Chat Assistant' },
         { to: '/logs', icon: FileText, label: 'PLC Logs' },
@@ -43,7 +46,13 @@ const Sidebar = () => {
 
             {/* New Session Button */}
             <div className="p-4 border-t border-industrial-200">
-                <button className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white py-2.5 px-4 rounded-lg font-medium transition-colors shadow-sm text-sm">
+                <button
+                    onClick={() => {
+                        resetChatSession();
+                        navigate('/chat');
+                    }}
+                    className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white py-2.5 px-4 rounded-lg font-medium transition-colors shadow-sm text-sm"
+                >
                     <PlusCircle className="w-4 h-4" />
                     New Chat Session
                 </button>

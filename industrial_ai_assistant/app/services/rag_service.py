@@ -16,7 +16,7 @@ from app.models.fault_analysis_models import RetrievedDoc
 logger = logging.getLogger(__name__)
 
 RELEVANCE_THRESHOLD = 0.0   # accept all results from retriever (no score available from interface)
-DEFAULT_TOP_K = 5
+DEFAULT_TOP_K = 8  # Increased from 5 for higher Retrieval Coverage
 
 
 class RAGService:
@@ -58,6 +58,15 @@ class RAGService:
         t0 = time.perf_counter()
         try:
             raw_chunks = self._retriever.retrieve(query=query, top_k=top_k, filters=filters)
+            
+            # Phase 14: Dynamic Top-K Expansion if coverage is suspiciously low
+            if len(raw_chunks) < 3 and top_k < 15:
+                logger.info("RAG: Initial retrieval low coverage (<3 chunks). Expanding context window via relaxed top_k.")
+                raw_chunks_expanded = self._retriever.retrieve(query=query, top_k=15, filters=filters)
+                # Ensure we actually gained something
+                if len(raw_chunks_expanded) > len(raw_chunks):
+                    raw_chunks = raw_chunks_expanded
+                    
         except Exception as exc:
             logger.warning("RAG retrieval failed (non-fatal): %s", exc)
             return [], 0.0

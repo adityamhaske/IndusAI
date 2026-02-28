@@ -27,6 +27,15 @@ class StructuredLLMOutput(BaseModel):
     confidence: str
 
 
+class FlexibleLLMOutput(BaseModel):
+    """
+    Flexible schema for non-fault intents (e.g. general questions or document summaries).
+    """
+    summary: str
+    key_points: List[str]
+    confidence: str
+
+
 class FaultAnalysisV2Response(BaseModel):
     """Full enriched fault analysis response (v2)."""
     analysis_version: str = "v2.0"

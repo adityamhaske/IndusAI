@@ -34,11 +34,11 @@ trap cleanup INT TERM EXIT
 
 # 1. Qdrant
 echo "➤ Starting Qdrant (Vector DB)..."
-if [ -f "/tmp/qdrant" ]; then
-    /tmp/qdrant > qdrant.log 2>&1 &
+if [ -f "./qdrant" ]; then
+    ./qdrant > qdrant.log 2>&1 &
     PIDS+=($!)
 else
-    echo "   ⚠️ Binary at /tmp/qdrant not found. Assuming Qdrant is running globally or in Docker."
+    echo "   ⚠️ Binary at ./qdrant not found. Assuming Qdrant is running globally or in Docker."
 fi
 
 # 2. Ollama

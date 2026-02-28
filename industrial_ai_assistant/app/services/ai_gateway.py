@@ -66,6 +66,17 @@ class AIGatewayService:
         self.providers = providers
         self.policy = fallback_policy
         
+        # Hard fail if no providers configured to prevent downstream silent errors
+        if not self.providers:
+            error_msg = "AIGateway Startup Failure: No AI providers configured in registry."
+            logger.critical(error_msg)
+            raise RuntimeError(error_msg)
+            
+        logger.info(
+            f"AIGateway Initialized. Registered providers: {list(self.providers.keys())} | "
+            f"Primary: {self.policy.primary} | Secondary: {self.policy.secondary}"
+        )
+        
         # Circuit Breaker state
         self.failure_rate_threshold = failure_rate_threshold
         self.min_requests_window = min_requests_window
@@ -95,6 +106,15 @@ class AIGatewayService:
         # Telemetry State
         self.last_traces: List[Dict[str, Any]] = []
         self.last_error_timestamp: Optional[str] = None
+        
+    def reload_providers(self, new_providers: Dict[str, AIProvider], new_policy: FallbackPolicy):
+        """Dynamically hot-reloads the provider registry map and routing policy."""
+        logger.info(f"AIGateway: Reloading Provider Registry. New Providers: {list(new_providers.keys())}")
+        self.providers = new_providers
+        self.policy = new_policy
+        
+        if not self.providers:
+            logger.critical("AIGateway Reload warning: Resulting registry has zero active providers.")
 
     def _check_rate_limit(self) -> bool:
         """Enforces max_rpm request limits over a 60s sliding window."""
@@ -193,7 +213,8 @@ class AIGatewayService:
         response: AIResponse, 
         total_latency: int, 
         fallback_chain_depth: int, 
-        retrieval_coverage: Optional[float] = None
+        retrieval_coverage: Optional[float] = None,
+        retrieval_chunk_count: int = 0
     ):
         cost_usd = self._calculate_cost(response.model_name, response.prompt_tokens, response.completion_tokens)
         self._add_cost(cost_usd)
@@ -216,11 +237,30 @@ class AIGatewayService:
             "fallback_chain_depth": fallback_chain_depth,
             "response_format": request.response_format,
             "retrieval_coverage_score": retrieval_coverage,
+            "retrieval_chunk_count": retrieval_chunk_count,
             "estimated_cost_usd": cost_usd,
             "cumulative_daily_cost_usd": self.cumulative_daily_cost_usd,
             "cost_guard_triggered": self.cost_guard_triggered,
             "circuit_state": self.circuit_state.value
         }
+        
+        # --- PHASE 13 AUDIT LOGGING ---
+        raw_output_length = len(response.raw_output) if response.raw_output else 0
+        parsed_output_length = len(str(response.parsed_output)) if response.parsed_output else 0
+        
+        diagnosis_length = 0
+        primary_action_length = 0
+        if response.parsed_output and isinstance(response.parsed_output, dict):
+            diagnosis_length = len(str(response.parsed_output.get("diagnosis", "")))
+            primary_action_length = len(str(response.parsed_output.get("primary_action", "")))
+
+        logger.warning(
+            f"AUDIT | raw_len:{raw_output_length} | parsed_len:{parsed_output_length} | "
+            f"diag_len:{diagnosis_length} | act_len:{primary_action_length} | "
+            f"prompt_tok:{response.prompt_tokens} | comp_tok:{response.completion_tokens} | "
+            f"chunks:{retrieval_chunk_count} | cov:{retrieval_coverage}"
+        )
+        # ------------------------------
         
         # Keep last 100 traces
         self.last_traces.insert(0, trace)
@@ -265,8 +305,8 @@ class AIGatewayService:
         # 1. Provider-Aware Timeout Policy
         if provider.provider_type == "local":
             estimated_prompt_tokens = len(request.prompt) // 4
-            # Heuristic: 120s minimum or 8ms per prompt token parsing allowance
-            request.timeout_ms = max(120000, estimated_prompt_tokens * 8)
+            # Heuristic: 20s minimum or 4ms per prompt token parsing allowance
+            request.timeout_ms = max(20000, estimated_prompt_tokens * 4)
         else:
             # Cloud retains strict configured SLA limits
             request.timeout_ms = self.policy.timeout_ms if self.policy.timeout_ms else 8000
@@ -291,9 +331,9 @@ class AIGatewayService:
                 error_type="UNKNOWN"
             )
 
-    def _handle_zero_chunk_rag(self, request: AIRequest, retrieval_coverage_score: Optional[float]):
+    def _handle_zero_chunk_rag(self, request: AIRequest, retrieval_coverage_score: Optional[float], retrieval_chunk_count: int = 0):
         """Injects a fallback prompt instruction if RAG returned nothing."""
-        if retrieval_coverage_score is not None and retrieval_coverage_score == 0.0:
+        if retrieval_chunk_count == 0 or (retrieval_coverage_score is not None and retrieval_coverage_score == 0.0):
             fallback_instruction = "\n\nSYSTEM OVERRIDE: Limited retrieval context available. Provide generalized analysis."
             request.prompt += fallback_instruction
 
@@ -339,7 +379,7 @@ class AIGatewayService:
                 
             return primary_future.result(), 0
 
-    def execute(self, request: AIRequest, retrieval_coverage_score: Optional[float] = None) -> AIResponse:
+    def execute(self, request: AIRequest, retrieval_coverage_score: Optional[float] = None, retrieval_chunk_count: int = 0) -> AIResponse:
         """
         Main entry point for AI inference. 
         Applies Circuit Breaking, Fallback Routing, Zero-Chunk interception, and Cost accounting.
@@ -363,10 +403,23 @@ class AIGatewayService:
             t_start = time.perf_counter()
             
             # Zero-Chunk RAG Interception
-            self._handle_zero_chunk_rag(request, retrieval_coverage_score)
+            self._handle_zero_chunk_rag(request, retrieval_coverage_score, retrieval_chunk_count)
+
+            # --- PHASE 14: Intelligent Routing Heuristics ---
+            primary_id = self.policy.primary
+            
+            # Estimate tokens if not strictly provided (Fast approximation)
+            estimated_tokens = request.prompt_tokens if getattr(request, 'prompt_tokens', 0) > 0 else len(request.prompt) // 4
+            
+            # Heuristic trigger: large context, many chunks, or explicit summary
+            intent_type = getattr(request, 'intent_type', None)
+            is_heavy_load = estimated_tokens > 3000 or retrieval_chunk_count > 3 or intent_type == "DOCUMENT_SUMMARY"
+            
+            if is_heavy_load and "openai" in self.providers and hasattr(self.providers["openai"], "api_key") and self.providers["openai"].api_key:
+                logger.info(f"AIGateway: Intelligent Routing triggered (Context: {estimated_tokens} tokens, Chunks: {retrieval_chunk_count}, Intent: {intent_type}). Promoting cloud provider 'openai' to primary.")
+                primary_id = "openai"
 
             chain_depth = 0
-            primary_id = self.policy.primary
             
             # 2. Check Circuit Breaker State against Primary
             self._update_circuit_window()
@@ -384,7 +437,7 @@ class AIGatewayService:
                     )
                     self._record_result(is_failure=True)
                     # Note: We skip the primary retry block entirely if OPEN
-                    return self._trigger_secondary_fallback(request, res, t_start, chain_depth, retrieval_coverage_score)
+                    return self._trigger_secondary_fallback(request, res, t_start, chain_depth, retrieval_coverage_score, retrieval_chunk_count)
 
             if self.circuit_state == CircuitState.HALF_OPEN and self.half_open_probe_active:
                 # We already have a probe in flight concurrently, reject others until it lands
@@ -393,7 +446,7 @@ class AIGatewayService:
                     raw_output="", model_name="unknown", provider_name=primary_id,
                     success=False, error="Circuit Breaker HALF_OPEN probe in progress.", error_type="CONNECTION"
                 )
-                return self._trigger_secondary_fallback(request, res, t_start, chain_depth, retrieval_coverage_score)
+                return self._trigger_secondary_fallback(request, res, t_start, chain_depth, retrieval_coverage_score, retrieval_chunk_count)
                 
             if self.circuit_state == CircuitState.HALF_OPEN:
                 self.half_open_probe_active = True
@@ -424,11 +477,11 @@ class AIGatewayService:
                     
                 # If still failing, route to Secondary Fallback
                 if not response.success:
-                    return self._trigger_secondary_fallback(request, response, t_start, chain_depth, retrieval_coverage_score)
+                    return self._trigger_secondary_fallback(request, response, t_start, chain_depth, retrieval_coverage_score, retrieval_chunk_count)
 
             # 5. Primary Success - Log & Return
             total_ms = int((time.perf_counter() - t_start) * 1000)
-            self._log_telemetry(request, response, total_ms, chain_depth, retrieval_coverage_score)
+            self._log_telemetry(request, response, total_ms, chain_depth, retrieval_coverage_score, retrieval_chunk_count)
             return response
         finally:
             self.concurrency_semaphore.release()
@@ -439,7 +492,8 @@ class AIGatewayService:
         primary_last_response: AIResponse, 
         t_start: float,
         chain_depth: int, 
-        retrieval_coverage_score: Optional[float]
+        retrieval_coverage_score: Optional[float],
+        retrieval_chunk_count: int = 0
     ) -> AIResponse:
         """Handles the secondary provider fallback logic."""
         secondary_id = self.policy.secondary
@@ -448,13 +502,13 @@ class AIGatewayService:
         if self.cost_guard_triggered and secondary_id and secondary_id != "local":
             logger.warning("AIGateway: Fallback blocked due to DEGRADED_NO_CLOUD daily cost guardrail.")
             total_ms = int((time.perf_counter() - t_start) * 1000)
-            self._log_telemetry(request, primary_last_response, total_ms, chain_depth, retrieval_coverage_score)
+            self._log_telemetry(request, primary_last_response, total_ms, chain_depth, retrieval_coverage_score, retrieval_chunk_count)
             return primary_last_response
             
         if not secondary_id or secondary_id not in self.providers:
             logger.error("AIGateway: Exhausted Fallback Route! Secondary Provider not configured.")
             total_ms = int((time.perf_counter() - t_start) * 1000)
-            self._log_telemetry(request, primary_last_response, total_ms, chain_depth, retrieval_coverage_score)
+            self._log_telemetry(request, primary_last_response, total_ms, chain_depth, retrieval_coverage_score, retrieval_chunk_count)
             return primary_last_response
             
         chain_depth += 1
@@ -485,6 +539,9 @@ class AIGatewayService:
             "status": "DEGRADED" if self.circuit_state != CircuitState.CLOSED else "OPERATIONAL",
             "primary_provider": self.policy.primary,
             "secondary_provider": self.policy.secondary,
+            "registered_providers": list(self.providers.keys()),
+            "llm_connected": self.circuit_state != CircuitState.OPEN,
+            "vector_store_connected": True,  # Qdrant health checked separately at startup
             "circuit_breaker": {
                 "state": self.circuit_state.value,
                 "failures_in_window": failures,

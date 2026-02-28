@@ -22,7 +22,7 @@ import logging
 import os
 import re
 import time
-from typing import List, Optional
+from typing import List, Optional, Any
 
 from app.core.fault_exceptions import (
     AnalysisPrerequisiteError,
@@ -38,7 +38,10 @@ from app.models.fault_analysis_models import (
     FaultAnalysisV2Response,
     RetrievedDoc,
     StructuredLLMOutput,
+    FlexibleLLMOutput,
 )
+from app.services.query_classifier import classify
+from app.models.project_models import IntentType
 from app.services.fault_response_validator import FaultResponseValidator
 from app.services.fault_service import FaultService, get_fault_service
 from app.services.rag_service import RAGService
@@ -69,6 +72,12 @@ _LLM_JSON_SCHEMA = """{
     "trend": "<RISING | STABLE | DECLINING>"
   },
   "primary_action": "<Single concrete, targeted technical action.>",
+  "confidence": "<LOW | MEDIUM | HIGH>"
+}"""
+
+_FLEXIBLE_JSON_SCHEMA = """{
+  "summary": "<Comprehensive explanation of the topic.>",
+  "key_points": ["<Point 1>", "<Point 2>"],
   "confidence": "<LOW | MEDIUM | HIGH>"
 }"""
 
@@ -227,6 +236,16 @@ class FaultAnalysisOrchestrator:
                 total_latency_ms=round(total_ms, 1),
             )
 
+        # Classify Intent for Dynamic Schema Routing
+        intent_val = IntentType.FAULT_ANALYSIS.value
+        if request.question:
+            intent_result = classify(request.question)
+            intent_val = intent_result.intent_type
+
+        is_fault_intent = (intent_val == IntentType.FAULT_ANALYSIS.value)
+        schema_model = StructuredLLMOutput if is_fault_intent else FlexibleLLMOutput
+        schema_text = _LLM_JSON_SCHEMA if is_fault_intent else _FLEXIBLE_JSON_SCHEMA
+
         prompt = _build_prompt(
             row_id=request.row_id,
             fault_code=fault_code,
@@ -245,6 +264,8 @@ class FaultAnalysisOrchestrator:
             confidence=confidence,
             docs=rag_docs,
             user_question=request.question,
+            schema_text=schema_text,
+            is_fault_intent=is_fault_intent,
         )
 
         if _DEBUG_LLM:
@@ -257,20 +278,34 @@ class FaultAnalysisOrchestrator:
 
         # ── Step 5: LLM call (with retry) ────────────────────────────────────
         t_llm_start = time.perf_counter()
-        llm_output, is_fallback, raw_output = self._call_llm_with_retry(prompt, retrieval_coverage_score=retrieval_coverage_score)
+        llm_output, is_fallback, raw_output = self._call_llm_with_retry(
+            prompt, 
+            schema_model=schema_model,
+            retrieval_coverage_score=retrieval_coverage_score,
+            retrieval_chunk_count=len(rag_docs),
+            intent_type=intent_val
+        )
         llm_ms = (time.perf_counter() - t_llm_start) * 1000
 
         # ── Step 6: Validation ────────────────────────────────────────────────
         doc_sources = [d.source_file for d in rag_docs]
         
         if llm_output is not None:
-            cleaned, hallucinated, val_warnings = self._validator.validate(
-                llm_output, doc_sources, known_tags=None
-            )
-            diagnosis_text = cleaned.diagnosis
-            action_text = cleaned.primary_action
-            evidence_data = cleaned.metrics
-            final_confidence = cleaned.confidence or confidence
+            if isinstance(llm_output, FlexibleLLMOutput):
+                diagnosis_text = llm_output.summary
+                action_text = "See key points or documentation for more details."
+                evidence_data = {"key_points": llm_output.key_points}
+                final_confidence = llm_output.confidence or confidence
+                hallucinated = []
+                val_warnings = []
+            else:
+                cleaned, hallucinated, val_warnings = self._validator.validate(
+                    llm_output, doc_sources, known_tags=None
+                )
+                diagnosis_text = cleaned.diagnosis
+                action_text = cleaned.primary_action
+                evidence_data = cleaned.metrics
+                final_confidence = cleaned.confidence or confidence
         else:
             # L9 JSON Resiliency fallback
             logger.error("JSON parsing failed entirely for row %d. Degrading to raw text display.", request.row_id)
@@ -315,12 +350,12 @@ class FaultAnalysisOrchestrator:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _call_llm_with_retry(
-        self, prompt: str, max_retries: int = 1, retrieval_coverage_score: Optional[float] = None
-    ) -> tuple[Optional[StructuredLLMOutput], bool, str]:
+        self, prompt: str, schema_model: Any, max_retries: int = 1, retrieval_coverage_score: Optional[float] = None, retrieval_chunk_count: int = 0, intent_type: Optional[str] = None
+    ) -> tuple[Optional[Any], bool, str]:
         """
-        Call LLM Gateway and parse response. Retry once on parse failure.
+        Call LLM Gateway and parse response. Retry once on parse failure or low quality.
         Raises LLMConnectionError on timeout/connection failure.
-        Returns (parsed_output, is_fallback, raw_output). parsed_output is None if schema validations fail.
+        Returns (parsed_output, is_fallback, raw_output). parsed_output is None if validations fail.
         """
         last_exc = None
         raw_out = ""
@@ -329,9 +364,10 @@ class FaultAnalysisOrchestrator:
             req = AIRequest(
                 prompt=prompt,
                 response_format="json",
-                json_schema=StructuredLLMOutput.schema()
+                json_schema=schema_model.schema(),
+                intent_type=intent_type
             )
-            res = self._llm.execute(req, retrieval_coverage_score=retrieval_coverage_score)
+            res = self._llm.execute(req, retrieval_coverage_score=retrieval_coverage_score, retrieval_chunk_count=retrieval_chunk_count)
             raw_out = res.raw_output
             
             logger.debug("LLM attempt %d raw response (%.0fms): %s",
@@ -339,11 +375,18 @@ class FaultAnalysisOrchestrator:
                          
             if res.success and res.parsed_output:
                 try:
-                    parsed = StructuredLLMOutput(**res.parsed_output)
+                    parsed = schema_model(**res.parsed_output)
+                    
+                    # Phase 13 Item 3: Low-Quality Output Detection
+                    if hasattr(parsed, "diagnosis") and len(parsed.diagnosis.strip()) < 10:
+                        raise ValueError("LowQualityOutput: diagnosis is anomalously short.")
+                    
                     return parsed, False, raw_out
                 except Exception as exc:
                     last_exc = exc
-                    logger.warning("LLM attempt %d/%d pydantic schema validation failed: %s", attempt + 1, max_retries + 1, exc)
+                    logger.warning("LLM attempt %d/%d validation failed: %s", attempt + 1, max_retries + 1, exc)
+                    if attempt < max_retries:
+                        prompt += "\n\nSYSTEM WARNING: Your previous output was malformed or generated insufficient content. Ensure you provide a comprehensive and properly formatted JSON response matching the schema exactly."
             else:
                 if res.error_type in ["CONNECTION", "TIMEOUT"]:
                     raise LLMConnectionError(f"Gateway Error: {res.error}")
@@ -359,7 +402,7 @@ class FaultAnalysisOrchestrator:
 def _build_prompt(
     row_id, fault_code, device, ref_ts, severity, message,
     occ_1h, occ_24h, co_fault, co_count, burst_detected, burst_desc, burst_count, trend,
-    confidence, docs, user_question,
+    confidence, docs, user_question, schema_text, is_fault_intent
 ) -> str:
     doc_section = ""
     if docs:
@@ -374,6 +417,23 @@ def _build_prompt(
     question_section = ""
     if user_question:
         question_section = f"\n\nUSER QUESTION:\n{user_question}"
+
+    if is_fault_intent:
+        rules = """OUTPUT RULES:
+  - Return ONLY valid JSON matching this exact schema (no prose outside JSON):
+  - 'diagnosis' must be a SINGLE high-impact string (max 3 lines). DO NOT use filler words or conversational phrasing ("it appears", "it may indicate").
+  - Map deterministic STATISTICS directly into the nested 'metrics' JSON object. Do not hallucinate values.
+  - 'primary_action' must be ONE concrete, technically targeted action. Do NOT give generic "inspect hardware" advice.
+  - Do NOT invent PLC tag names not present in documentation.
+  - Do NOT invent document sections."""
+    else:
+        rules = """OUTPUT RULES:
+  - Return ONLY valid JSON matching this exact schema (no prose outside JSON):
+  - The user has asked a general question or asked for document summarization. 
+  - Provide a comprehensive technical answer in 'summary'.
+  - Extract detailed key points into 'key_points'.
+  - Do NOT invent PLC tag names not present in documentation.
+  - Do NOT invent document sections."""
 
     return f"""You are a PLC commissioning assistant. Analyze the fault using the provided statistics and documentation context.
 
@@ -395,15 +455,9 @@ STATISTICS (deterministic — do NOT recompute, map exactly into JSON output):
   Trend: {trend}
   Confidence level (determined externally): {confidence}{doc_section}{question_section}
 
-OUTPUT RULES:
-  - Return ONLY valid JSON matching this exact schema (no prose outside JSON):
-  - 'diagnosis' must be a SINGLE high-impact string (max 3 lines). DO NOT use filler words or conversational phrasing ("it appears", "it may indicate").
-  - Map deterministic STATISTICS directly into the nested 'metrics' JSON object. Do not hallucinate values.
-  - 'primary_action' must be ONE concrete, technically targeted action. Do NOT give generic "inspect hardware" advice.
-  - Do NOT invent PLC tag names not present in documentation.
-  - Do NOT invent document sections.
+{rules}
 
-{_LLM_JSON_SCHEMA}
+{schema_text}
 """
 
 

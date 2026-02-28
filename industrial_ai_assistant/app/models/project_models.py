@@ -114,6 +114,23 @@ class ProjectStatus(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+# ── Index Metadata (Delta Persistence) ─────────────────────────────────────────
+
+class IndexedFile(BaseModel):
+    rel_path: str
+    file_hash: str
+    last_modified: float
+    chunk_count: int = 0
+
+class IndexMetadata(BaseModel):
+    project_id: str
+    project_root: str
+    project_hash: str
+    index_version: str = "v1"
+    last_index_time: float
+    files: dict[str, IndexedFile] = Field(default_factory=dict)
+
+
 # ── Project metrics ───────────────────────────────────────────────────────────
 
 class ProjectMetrics(BaseModel):

@@ -22,7 +22,7 @@ export const HistoryPage = () => (
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
     FolderOpen, RefreshCw, Trash2, CheckCircle2, AlertTriangle,
-    Loader2, Database, FileText, Cpu, Hash, Upload, FolderSearch, File, Frown, Save
+    Loader2, Database, FileText, Cpu, Hash, Upload, FolderSearch, File, Frown, Save, ShieldCheck, XCircle
 } from 'lucide-react';
 import systemApi from '../services/systemApi';
 import { getProjectStatus, resetProject, getProjectFiles } from '../services/knowledgeApi';
@@ -220,7 +220,7 @@ export const ProjectPage = () => {
                             </span>
                         )}
                         <span className={`text-xs font-bold px-3 py-1 rounded-full border ${statusColor(status.index_state)} uppercase tracking-wide`}>
-                            {status.index_state}
+                            {status.index_state === 'STALE' ? 'DELTA DETECTED' : status.index_state}
                         </span>
                     </div>
                 )}
@@ -414,6 +414,8 @@ export const SettingsPage = () => {
     const [speculative, setSpeculative] = useState(true);
     const [openaiKey, setOpenaiKey] = useState('');
     const [geminiKey, setGeminiKey] = useState('');
+    const [validateState, setValidateState] = useState({ openai: null, gemini: null }); // null | 'validating' | 'VALID' | 'INVALID'
+    const [validateDetail, setValidateDetail] = useState({ openai: null, gemini: null });
 
     useEffect(() => {
         let isMounted = true;
@@ -459,13 +461,40 @@ export const SettingsPage = () => {
         }
     };
 
+    const handleValidateKey = async (provider) => {
+        const key = provider === 'openai' ? openaiKey : geminiKey;
+        if (!key || key === '********') return;
+        setValidateState(prev => ({ ...prev, [provider]: 'validating' }));
+        setValidateDetail(prev => ({ ...prev, [provider]: null }));
+        try {
+            const res = await fetch('/api/ai/validate-provider', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ provider, api_key: key }),
+            });
+            const data = await res.json();
+            setValidateState(prev => ({ ...prev, [provider]: data.success ? 'VALID' : 'INVALID' }));
+            setValidateDetail(prev => ({
+                ...prev,
+                [provider]: data.success
+                    ? `Connected · ${data.model ?? 'unknown'} · ${data.latency_ms}ms`
+                    : (data.details || data.error || 'Invalid Key'),
+            }));
+        } catch (e) {
+            setValidateState(prev => ({ ...prev, [provider]: 'INVALID' }));
+            setValidateDetail(prev => ({ ...prev, [provider]: 'Connection failed' }));
+        }
+    };
+
     if (loading) {
         return <div className="p-8 flex items-center gap-3 text-industrial-500"><Loader2 className="w-5 h-5 animate-spin" /> Loading configuration...</div>;
     }
 
     const needsOpenAI = primary === 'openai' || secondary === 'openai';
     const needsGemini = primary === 'gemini' || secondary === 'gemini';
-    const disableSave = (needsOpenAI && !openaiKey) || (needsGemini && !geminiKey);
+    const openaiInvalid = needsOpenAI && validateState.openai === 'INVALID';
+    const geminiInvalid = needsGemini && validateState.gemini === 'INVALID';
+    const disableSave = (needsOpenAI && !openaiKey) || (needsGemini && !geminiKey) || openaiInvalid || geminiInvalid;
 
     return (
         <div className="p-8 max-w-4xl">
@@ -548,10 +577,23 @@ export const SettingsPage = () => {
                                 <input
                                     type="password"
                                     value={openaiKey}
-                                    onChange={e => setOpenaiKey(e.target.value)}
+                                    onChange={e => { setOpenaiKey(e.target.value); setValidateState(p => ({ ...p, openai: null })); }}
+                                    onBlur={() => handleValidateKey('openai')}
                                     placeholder="sk-..."
                                     className="w-full border border-industrial-200 rounded-lg px-3 py-2 text-sm text-industrial-800 focus:outline-none focus:border-primary-400 font-mono"
                                 />
+                                {validateState.openai === 'validating' && (
+                                    <div className="mt-1.5 flex items-center gap-1.5 text-xs text-industrial-500">
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Validating…
+                                    </div>
+                                )}
+                                {validateState.openai && validateState.openai !== 'validating' && (
+                                    <div className={`mt-1.5 flex items-center gap-1.5 text-xs font-semibold ${validateState.openai === 'VALID' ? 'text-green-600' : 'text-red-600'
+                                        }`}>
+                                        {validateState.openai === 'VALID' ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                                        {validateDetail.openai}
+                                    </div>
+                                )}
                             </div>
                             <div>
                                 <label className="text-xs font-medium text-industrial-600 mb-1 flex items-center justify-between">
@@ -561,10 +603,23 @@ export const SettingsPage = () => {
                                 <input
                                     type="password"
                                     value={geminiKey}
-                                    onChange={e => setGeminiKey(e.target.value)}
+                                    onChange={e => { setGeminiKey(e.target.value); setValidateState(p => ({ ...p, gemini: null })); }}
+                                    onBlur={() => handleValidateKey('gemini')}
                                     placeholder="AIzaSy..."
                                     className="w-full border border-industrial-200 rounded-lg px-3 py-2 text-sm text-industrial-800 focus:outline-none focus:border-primary-400 font-mono"
                                 />
+                                {validateState.gemini === 'validating' && (
+                                    <div className="mt-1.5 flex items-center gap-1.5 text-xs text-industrial-500">
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Validating…
+                                    </div>
+                                )}
+                                {validateState.gemini && validateState.gemini !== 'validating' && (
+                                    <div className={`mt-1.5 flex items-center gap-1.5 text-xs font-semibold ${validateState.gemini === 'VALID' ? 'text-green-600' : 'text-red-600'
+                                        }`}>
+                                        {validateState.gemini === 'VALID' ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                                        {validateDetail.gemini}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>

@@ -132,6 +132,7 @@ def test_prompt_includes_stats():
         occ_1h=5, occ_24h=30, co_fault="E002", co_count=1,
         burst_detected=True, burst_desc="5 faults in 10 min", burst_count=5,
         trend="STABLE", confidence="MEDIUM", docs=[], user_question=None,
+        schema_text="{}", is_fault_intent=True
     )
     assert "Occurrences_1h: 5" in prompt
     assert "Occurrences_24h: 30" in prompt
@@ -191,6 +192,7 @@ def test_custom_question_in_prompt():
         occ_1h=2, occ_24h=18, co_fault="INF_110", co_count=0,
         burst_detected=False, burst_desc="", burst_count=0,
         trend="STABLE", confidence="MEDIUM", docs=[], user_question=question,
+        schema_text="{}", is_fault_intent=True
     )
     assert "USER QUESTION" in prompt
     assert question in prompt

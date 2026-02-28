@@ -8,6 +8,7 @@ from app.api.routes_project_knowledge import router as project_knowledge_router
 from app.api.routes_knowledge import router as knowledge_router
 from app.api.routes_ingest_upload import router as ingest_upload_router
 from app.api import routes_ai
+from app.api import routes_ai_eval
 from app.config.settings import settings
 import os
 
@@ -32,6 +33,7 @@ app.include_router(project_knowledge_router, prefix="/api", tags=["Project Knowl
 app.include_router(knowledge_router, prefix="/api", tags=["Knowledge"])
 app.include_router(ingest_upload_router, prefix="/api", tags=["Ingest Upload"])
 app.include_router(routes_ai.router, prefix="/api/ai", tags=["AI Gateway"])
+app.include_router(routes_ai_eval.router, prefix="/api/ai", tags=["AI Gateway"])
 
 @app.get("/api/health")
 def health_check():

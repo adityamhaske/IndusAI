@@ -192,45 +192,55 @@ def _route_project(body: KnowledgeQueryRequest, t_start: float) -> KnowledgeQuer
 
 def _route_legacy_rag(body: KnowledgeQueryRequest, t_start: float) -> KnowledgeQueryResponse:
     """
-    Route to legacy ChatService (vector-only Qdrant search).
-    If legacy RAG fails (e.g. Qdrant not warmed up), returns a graceful
-    LEGACY_RAG_UNAVAILABLE response — not a 500 crash.
+    Route to legacy basic QA when no project is loaded.
     """
     try:
         from app.config.dependency_injection import get_container
-        from app.core.schemas import ChatRequest
-
+        from app.models.ai_models import AIRequest
+        
         container = get_container()
-        chat_req = ChatRequest(query=body.question, project_id=body.project_id)
+        gateway = container.ai_gateway
+        
         t_llm = time.perf_counter()
-        result = container.chat_service.chat(chat_req)
+        
+        # Simple systemic generic QA prompt
+        system_prompt = (
+            "You are an Industrial AI assistant. The user is asking a general question "
+            "but has not loaded a specific PLC project. Answer generally and concisely."
+        )
+        
+        req = AIRequest(
+            system_prompt=system_prompt,
+            prompt=body.question,
+            temperature=0.3,
+            max_tokens=500
+        )
+        
+        result = gateway.execute(req)
+        
         llm_ms = (time.perf_counter() - t_llm) * 1000
         total_ms = (time.perf_counter() - t_start) * 1000
 
-        logger.info(
-            "[legacy_rag] KNOWLEDGE mode=LEGACY_RAG confidence=%.2f prompt_v=%s",
-            result.confidence_score, "v3.0.0",
-        )
+        if not result.success:
+            raise Exception(result.error_message or "Gateway execution failed")
 
-        confidence = _float_to_confidence(result.confidence_score)
         return KnowledgeQueryResponse(
             question=body.question,
             project_id=body.project_id,
             knowledge_mode=KNOWLEDGE_MODE_LEGACY_RAG,
-            summary=result.summary,
-            reasoning=getattr(result, "limitations", ""),
+            summary=result.raw_output,
+            reasoning="General knowledge only.",
             structured_hits=[],
-            documentation_sources=list(result.source_sections),
-            confidence=confidence,
+            documentation_sources=[],
+            confidence="MEDIUM",
             prompt_version="v3.0.0",
-            warnings=["No project indexed — answers are based on general documentation only."],
+            warnings=["No project indexed — answers are based on general knowledge only."],
             llm_latency_ms=round(llm_ms, 1),
             total_latency_ms=round(total_ms, 1),
         )
 
     except Exception as exc:
-        # Legacy RAG unavailable (e.g. Qdrant not initialized, embedder error).
-        # Return a structured warning — not a 500 crash.
+        # Legacy RAG unavailable (e.g. gateway error).
         logger.warning("Legacy RAG unavailable: %s", exc)
         total_ms = (time.perf_counter() - t_start) * 1000
         return KnowledgeQueryResponse(
@@ -244,7 +254,7 @@ def _route_legacy_rag(body: KnowledgeQueryRequest, t_start: float) -> KnowledgeQ
             confidence="LOW",
             prompt_version="v3.0.0",
             warnings=[
-                "Legacy RAG unavailable — vector store may need initialization.",
+                "Legacy RAG unavailable — ai gateway error.",
                 f"Technical detail: {str(exc)[:120]}",
             ],
             total_latency_ms=round(total_ms, 1),

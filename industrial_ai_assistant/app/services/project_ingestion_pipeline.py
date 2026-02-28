@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
 from pathlib import Path
@@ -26,6 +27,8 @@ from app.core.project_exceptions import IngestionLockError
 from app.indexes.semantic_index import get_semantic_index
 from app.indexes.structured_index import clear_structured_index, get_structured_index
 from app.models.project_models import (
+    IndexedFile,
+    IndexMetadata,
     IngestionResult,
     SemanticChunk,
     StructuredHit,
@@ -92,19 +95,96 @@ class ProjectIngestionPipeline:
             folder=folder_path,
         )
 
-        # Clear previous indexes
-        clear_structured_index(project_id)
+        # ── Index instances (MUST be initialized before any use) ─────────────
         si = get_structured_index(project_id)
         sem = get_semantic_index()
-        sem.delete_project(project_id)
 
         folder = Path(folder_path)
         all_files = _collect_files(folder)
         result.files_scanned = len(all_files)
 
-        for file_path in all_files:
+        # ── Delta Indexing state ──────────────────────────────────────────────
+        metadata_path = folder / ".indusai_index.json"
+        old_meta: IndexMetadata | None = None
+
+        if metadata_path.exists():
+            try:
+                with open(metadata_path, 'r', encoding='utf-8') as f:
+                    old_meta = IndexMetadata.model_validate_json(f.read())
+            except Exception as e:
+                logger.warning("[%s] Failed to load index metadata: %s", project_id, e)
+
+        # No metadata → full wipe and reindex
+        if not old_meta:
+            clear_structured_index(project_id)
+            sem.delete_project(project_id)
+            logger.info("[%s] No valid metadata found. Performing Full Reindex.", project_id)
+        
+        new_meta = IndexMetadata(
+            project_id=project_id,
+            project_root=str(folder),
+            project_hash=result.project_hash,
+            last_index_time=time.time(),
+        )
+
+        old_files = old_meta.files if old_meta else {}
+        current_files_map = {str(f.relative_to(folder)): f for f in all_files}
+        
+        if old_meta:
+            si.load_from_disk(str(folder))
+
+        # 1. Purge deleted files
+        for rel_path in list(old_files.keys()):
+            if rel_path not in current_files_map:
+                logger.info("[%s] File deleted: %s", project_id, rel_path)
+                si.remove_file(str(folder / rel_path))
+                sem.remove_file(project_id, str(folder / rel_path))
+
+        # 2. Process active files
+        for rel_path, file_path in current_files_map.items():
             ext = file_path.suffix.lower()
             try:
+                mtime = file_path.stat().st_mtime
+                # Fast size-based hash proxy if large, else full hash
+                h = hashlib.sha256()
+                size = file_path.stat().st_size
+                if size <= 1024 * 1024:
+                    h.update(file_path.read_bytes())
+                else:
+                    with open(file_path, "rb") as f:
+                        h.update(f.read(64*1024))
+                    h.update(str(size).encode())
+                file_hash = h.hexdigest()
+
+                # Delta check
+                is_modified = True
+                old_record = old_files.get(rel_path)
+                if old_record:
+                    # If mtime and hash match, skip
+                    if old_record.last_modified == mtime or old_record.file_hash == file_hash:
+                        is_modified = False
+                
+                track_record = IndexedFile(
+                    rel_path=rel_path,
+                    file_hash=file_hash,
+                    last_modified=mtime,
+                    chunk_count=old_record.chunk_count if old_record else 0
+                )
+
+                if not is_modified:
+                    logger.debug("[%s] Delta Skip (Unchanged): %s", project_id, rel_path)
+                    new_meta.files[rel_path] = track_record
+                    result.files_indexed += 1
+                    continue
+
+                logger.info("[%s] Ingesting (Modified/New): %s", project_id, rel_path)
+                if old_record:
+                    si.remove_file(str(file_path))
+                    sem.remove_file(project_id, str(file_path))
+
+                # Track chunks manually to store in metadata
+                chunks_before = sem.collection_size(project_id)
+
                 if ext in (".l5x",):
                     await asyncio.get_event_loop().run_in_executor(
                         None, self._ingest_l5x, file_path, project_id, si, sem, result
@@ -126,6 +206,9 @@ class ProjectIngestionPipeline:
                     continue
 
                 result.files_indexed += 1
+                chunks_added = sem.collection_size(project_id) - chunks_before
+                track_record.chunk_count = max(0, chunks_added)  # Handle any weirdness
+                new_meta.files[rel_path] = track_record
 
             except Exception as exc:
                 msg = f"Failed to ingest {file_path.name}: {exc}"
@@ -133,8 +216,23 @@ class ProjectIngestionPipeline:
                 result.errors.append(msg)
                 result.files_failed += 1
 
-        # Size warnings
+        # Save metadata to disk
+        try:
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                f.write(new_meta.model_dump_json(indent=2))
+            si.save_to_disk(str(folder))
+        except Exception as e:
+            logger.error("[%s] Failed to save index metadata to %s: %s", project_id, metadata_path, e)
+
+        # Re-fetch aggregate sizes rather than incrementing Delta loop blindly 
         si_stats = si.stats()
+        result.tags_indexed = si_stats.tags
+        result.routines_indexed = si_stats.routines
+        result.aois_indexed = si_stats.aois
+        result.io_rows_indexed = si_stats.io_rows
+        result.semantic_chunks_indexed = sem.collection_size(project_id)
+
+        # Size warnings
         result.warnings.extend(si_stats.warnings)
         if si_stats.at_capacity:
             result.warnings.append(

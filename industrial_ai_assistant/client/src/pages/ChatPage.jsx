@@ -5,6 +5,8 @@ import useAppStore from '../store/useAppStore';
 import AnswerCard from '../components/chat/AnswerCard';
 import ProjectExplorer from '../components/chat/ProjectExplorer';
 
+import { Link } from 'react-router-dom';
+
 // ── Knowledge Mode Badge ───────────────────────────────────────────────────────
 const KnowledgeBadge = ({ status }) => {
     if (!status) return null;
@@ -23,7 +25,7 @@ const KnowledgeBadge = ({ status }) => {
         <div className="flex items-center gap-2 text-xs bg-yellow-50 border border-yellow-200 text-yellow-700 px-3 py-1.5 rounded-full font-medium">
             <span className="w-2 h-2 rounded-full bg-yellow-500" />
             General Documentation Mode —{' '}
-            <a href="/settings" className="underline hover:text-yellow-800">Index a project</a>
+            <Link to="/project" className="underline hover:text-yellow-800">Index a project</Link>
         </div>
     );
 };
@@ -197,7 +199,7 @@ const ChatPage = () => {
             appendAssistantMessage(
                 isNotIndexed
                     ? `🔴 No project indexed. Go to Settings → Index your project folder first.\n\nDetected tags: ${(errData.detected_tags || []).join(', ')}`
-                    : `❌ Error: ${err.message || 'Unknown error'}`
+                    : `⚠️ AI service is currently unable to process your request. Please check provider configuration in Settings.`
             );
         } finally {
             setIsLoading(false);
@@ -237,9 +239,23 @@ const ChatPage = () => {
                         )}
                         {chatHistory.map((msg) => <Message key={msg.id} msg={msg} />)}
                         {isLoading && (
-                            <div className="p-5 flex items-center gap-3 text-industrial-400 bg-industrial-50 border-b border-industrial-100">
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                                <span className="text-sm">Querying knowledge engine…</span>
+                            <div className="p-5 bg-industrial-50 border-b border-industrial-100">
+                                <div className="flex items-start gap-3 max-w-3xl mx-auto">
+                                    <div className="w-7 h-7 rounded-full bg-industrial-200 text-industrial-600 flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">AI</div>
+                                    <div className="flex-1 space-y-3">
+                                        <div className="flex items-center gap-2 text-sm text-industrial-500">
+                                            <Loader2 className="w-4 h-4 animate-spin" />
+                                            <span>Searching knowledge base…</span>
+                                        </div>
+                                        {/* Shimmer skeleton */}
+                                        <div className="space-y-2 animate-pulse">
+                                            <div className="h-4 bg-industrial-200 rounded w-3/4" />
+                                            <div className="h-4 bg-industrial-200 rounded w-full" />
+                                            <div className="h-4 bg-industrial-200 rounded w-5/6" />
+                                            <div className="h-3 bg-industrial-100 rounded w-1/2 mt-3" />
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         )}
                         <div ref={bottomRef} className="pb-4" />

@@ -29,7 +29,7 @@ class SemanticIndex:
     BM25 index is maintained in-process over chunk texts per project.
     """
 
-    def __init__(self, embedder, qdrant_host: str = "localhost", qdrant_port: int = 6333):
+    def __init__(self, embedder, qdrant_host: str = "127.0.0.1", qdrant_port: int = 6333):
         self._embedder = embedder
         self._host = qdrant_host
         self._port = qdrant_port
@@ -118,14 +118,13 @@ class SemanticIndex:
         if scope_files is not None:
             must.append(FieldCondition(key="source_file", match=MatchAny(any=list(scope_files))))
 
-        response = client.query_points(
+        hits = client.search(
             collection_name=_QDRANT_COLLECTION,
-            query=q_emb,
+            query_vector=q_emb,
             query_filter=Filter(must=must),
             limit=top_k,
             with_payload=True,
         )
-        hits = response.points if hasattr(response, "points") else response
         return [_hit_to_scored(h, "vector") for h in hits]
 
     # ── BM25 keyword search ────────────────────────────────────────────────────
@@ -242,6 +241,42 @@ class SemanticIndex:
         self._df.pop(project_id, None)
         logger.info("Deleted SemanticIndex data for project=%s", project_id)
 
+    def remove_file(self, project_id: str, source_file: str) -> int:
+        """Remove all chunks associated with a specific file from Qdrant and BM25."""
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        
+        # 1. Remove from BM25 memory
+        removed_count = 0
+        store = self._chunk_store.get(project_id, {})
+        to_delete = [cid for cid, chunk in store.items() if chunk.source_file == source_file]
+        for cid in to_delete:
+            chunk = store.pop(cid)
+            removed_count += 1
+            tokens = _tokenise(chunk.content)
+            tf_map = {}
+            for t in tokens:
+                tf_map[t] = tf_map.get(t, 0) + 1
+            for term, tf in tf_map.items():
+                if term in self._bm25_index[project_id] and cid in self._bm25_index[project_id][term]:
+                    del self._bm25_index[project_id][term][cid]
+                if term in self._df[project_id]:
+                    self._df[project_id][term] = max(0, self._df[project_id][term] - 1)
+
+        # 2. Remove from Qdrant
+        if removed_count > 0:
+            client = self._get_client()
+            client.delete(
+                collection_name=_QDRANT_COLLECTION,
+                points_selector=Filter(
+                    must=[
+                        FieldCondition(key="project_id", match=MatchValue(value=project_id)),
+                        FieldCondition(key="source_file", match=MatchValue(value=source_file))
+                    ]
+                )
+            )
+        logger.info("[%s] Removed %d semantic chunks for file '%s'.", project_id, removed_count, source_file)
+        return removed_count
+
     # ── BM25 helpers ──────────────────────────────────────────────────────────
 
     def _bm25_add(self, project_id: str, chunk_id: str, text: str, chunk: SemanticChunk) -> None:
@@ -286,7 +321,7 @@ def _hit_to_scored(hit, method: str) -> ScoredChunk:
 _instance: SemanticIndex | None = None
 
 
-def get_semantic_index(embedder=None, host="localhost", port=6333) -> SemanticIndex:
+def get_semantic_index(embedder=None, host="127.0.0.1", port=6333) -> SemanticIndex:
     global _instance
     if _instance is None:
         if embedder is None:

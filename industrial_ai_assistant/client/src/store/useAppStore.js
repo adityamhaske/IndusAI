@@ -44,6 +44,15 @@ const useAppStore = create(
                 set({ chatHistory: [] });
             },
 
+            resetChatSession() {
+                set({
+                    chatHistory: [],
+                    selectedFiles: [],
+                    selectedFolders: [],
+                    scopeMode: 'GLOBAL',
+                });
+            },
+
             // ── Project knowledge status ──────────────────────────────────
             knowledgeStatus: null,   // ProjectStatus from backend
             setKnowledgeStatus(s) { set({ knowledgeStatus: s }); },
