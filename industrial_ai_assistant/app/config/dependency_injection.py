@@ -57,9 +57,9 @@ class Container:
         # 3. AI Gateway (replaces raw LLMInterface)
         providers = {}
         if settings.LLM_PROVIDER == "ollama":
-            providers["local"] = LocalOllamaProvider(base_url=settings.OLLAMA_BASE_URL, model=settings.OLLAMA_MODEL)
+            providers["local_ollama"] = LocalOllamaProvider(base_url=settings.OLLAMA_BASE_URL, model=settings.OLLAMA_MODEL)
         else:
-            providers["local"] = LocalOllamaProvider(base_url="http://mock", model="mock")
+            providers["local_ollama"] = LocalOllamaProvider(base_url="http://mock", model="mock")
             
         if settings.ENABLE_CLOUD_PROVIDERS:
             # Inject securely mapped environment secrets
@@ -70,9 +70,9 @@ class Container:
                 
         # Canary deployment: define the fallback route
         policy = FallbackPolicy(
-            primary="local",
+            primary="local_ollama",
             secondary="openai" if "openai" in providers else None,
-            timeout_ms=5000,
+            timeout_ms=8000,
             json_enforced=True
         )
         
@@ -82,7 +82,7 @@ class Container:
             failure_rate_threshold=0.5,
             window_seconds=60,
             max_daily_cost_usd=settings.MAX_DAILY_COST_USD,
-            enable_speculative_fallback=settings.ENABLE_SPECULATIVE_FALLBACK
+            enable_speculative_fallback=False  # Disabled for stabilization
         )
             
         # 4. Retrieval

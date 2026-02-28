@@ -291,26 +291,25 @@ class AIGatewayService:
 
     def _invoke_provider(self, provider_id: str, request: AIRequest) -> AIResponse:
         """Wrapper to call a provider and catch total catastrophic unhandled exceptions."""
+        # Normalize legacy key aliases
+        if provider_id == "local":
+            provider_id = "local_ollama"
+        
         provider = self.providers.get(provider_id)
         if not provider:
+            registered = list(self.providers.keys())
+            logger.error("Provider '%s' not found. Registered: %s", provider_id, registered)
             return AIResponse(
                 raw_output="",
                 model_name="unknown",
                 provider_name=provider_id,
                 success=False,
-                error=f"Provider '{provider_id}' is not configured in Gateway.",
-                error_type="UNKNOWN"
+                error=f"Provider '{provider_id}' is not configured. Active providers: {registered}",
+                error_type="PROVIDER_NOT_FOUND"
             )
             
-        # 1. Provider-Aware Timeout Policy
-        if provider.provider_type == "local":
-            estimated_prompt_tokens = len(request.prompt) // 4
-            # Heuristic: 20s minimum or 4ms per prompt token parsing allowance
-            request.timeout_ms = max(20000, estimated_prompt_tokens * 4)
-        else:
-            # Cloud retains strict configured SLA limits
-            request.timeout_ms = self.policy.timeout_ms if self.policy.timeout_ms else 8000
-            
+        # Provider-aware timeout — generation is now unbounded (timeout=None in providers).
+        # The timeout_ms field is preserved for health probe calls only.
         try:
             res = provider.generate(request)
             

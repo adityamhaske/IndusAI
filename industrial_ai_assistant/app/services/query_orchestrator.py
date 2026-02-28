@@ -349,12 +349,28 @@ def _call_llm(prompt: str, retrieval_coverage_score: float = 0.0) -> str:
     res = gateway.execute(req, retrieval_coverage_score=retrieval_coverage_score)
     
     if not res.success:
-        # NEVER expose raw gateway internals to the user
-        logger.error("AIGateway returned failure: %s", res.error)
-        raise LLMConnectionError(
-            "AI service is currently unable to process your request. "
-            "Please check provider configuration in Settings."
-        )
+        # Parse the error to produce a provider-specific user-facing message
+        err = res.error or ""
+        provider = res.provider_name or "unknown"
+        logger.error("AIGateway failure [%s]: %s", provider, err)
+        
+        if "PROVIDER_NOT_FOUND" in (res.error_type or ""):
+            user_msg = "No AI provider connected. Please configure a provider in Settings."
+        elif "401" in err or "403" in err or "INVALID_API_KEY" in err or "Unauthorized" in err:
+            user_msg = f"{provider.replace('_', ' ').title()} connection failed: Invalid API key. Check your key in Settings."
+        elif "ConnectError" in err or "Connection refused" in err or "not reachable" in err:
+            if "ollama" in provider.lower() or "local" in provider.lower():
+                user_msg = "Ollama is not reachable at localhost:11434. Make sure Ollama is running."
+            else:
+                user_msg = f"{provider.replace('_', ' ').title()} is not reachable. Check your network connection."
+        elif "RATE_LIMIT" in err:
+            user_msg = "AI service is rate-limited. Please wait a moment and try again."
+        elif "Circuit Breaker" in err:
+            user_msg = "AI service is temporarily paused due to repeated failures. It will recover automatically."
+        else:
+            user_msg = f"AI provider '{provider}' returned an error. Please check Settings or try again."
+        
+        raise LLMConnectionError(user_msg)
         
     return res.raw_output
 

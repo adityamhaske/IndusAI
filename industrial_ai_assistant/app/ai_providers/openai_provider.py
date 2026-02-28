@@ -60,16 +60,14 @@ class OpenAIProvider(AIProvider):
             "Content-Type": "application/json"
         }
         
-        timeout_seconds = request.timeout_ms / 1000.0
-        idle_timeout_seconds = 5.0
-
+        # No timeout — let OpenAI take as long as needed
         try:
             with self._sync_client.stream(
                 "POST",
                 "/v1/chat/completions",
                 json=payload,
                 headers=headers,
-                timeout=httpx.Timeout(connect=5.0, read=timeout_seconds, write=5.0, pool=5.0)
+                timeout=httpx.Timeout(None)
             ) as response:
                 response.raise_for_status()
                 
@@ -81,10 +79,6 @@ class OpenAIProvider(AIProvider):
                 
                 import json
                 for line in response.iter_lines():
-                    current_time = time.perf_counter()
-                    
-                    if first_token_received and (current_time - last_token_timestamp > idle_timeout_seconds):
-                        raise httpx.TimeoutException(f"Cloud model generation exceeded configured idle timeout ({idle_timeout_seconds}s stall).")
                         
                     if line.startswith("data: "):
                         data_str = line[6:]
@@ -127,8 +121,6 @@ class OpenAIProvider(AIProvider):
                 error=None
             )
 
-        except httpx.TimeoutException:
-            return self._build_error_response("Cloud model generation exceeded configured idle timeout.", "TIMEOUT", start_time)
         except httpx.HTTPStatusError as e:
             return self._build_error_response(f"OpenAI HTTP error: {e.response.status_code} - {e.response.text[:100]}", "CONNECTION", start_time)
         except httpx.RequestError as e:

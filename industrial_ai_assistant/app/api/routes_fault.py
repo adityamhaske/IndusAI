@@ -17,6 +17,8 @@ from typing import Optional
 import pandas as pd
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
 
 from app.core.fault_exceptions import (
     AnalysisPrerequisiteError,
@@ -96,6 +98,46 @@ async def upload_fault_csv(
         return _fault_error(exc, status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
 
     return UploadResponse(**result)
+
+
+# ── POST /fault/load-dataset ──────────────────────────────────────────────────
+
+class LoadDatasetRequest(BaseModel):
+    file_path: str
+    project_id: str = "default"
+
+@router.post("/load-dataset", response_model=UploadResponse)
+async def load_stored_dataset(body: "LoadDatasetRequest"):
+    """
+    Load a previously uploaded telemetry CSV by its stored file_path —
+    no re-upload required. Used by the persistent telemetry dropdown.
+    """
+    from pathlib import Path
+    from pydantic import BaseModel as _BM
+    p = Path(body.file_path)
+    if not p.exists() or not p.is_file():
+        return JSONResponse(
+            status_code=404,
+            content={"error": "DATASET_NOT_FOUND", "message": f"File not found: {body.file_path}"},
+        )
+    try:
+        raw_bytes = p.read_bytes()
+        df_raw = pd.read_csv(io.BytesIO(raw_bytes))
+        df_norm, warnings = normalize(df_raw, source_filename=p.name)
+        svc = get_fault_service()
+        result = svc.upload(
+            df=df_norm,
+            source_filename=p.name,
+            raw_bytes=raw_bytes,
+            project_id=body.project_id,
+            warnings=warnings,
+        )
+        return UploadResponse(**result)
+    except FaultSchemaError as exc:
+        return _fault_error(exc)
+    except Exception as exc:
+        logger.exception("load-dataset failed for %s", body.file_path)
+        return JSONResponse(status_code=500, content={"error": "LOAD_FAILED", "message": str(exc)})
 
 
 # ── GET /fault/list ───────────────────────────────────────────────────────────

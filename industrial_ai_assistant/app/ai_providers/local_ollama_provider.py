@@ -46,12 +46,9 @@ class LocalOllamaProvider(AIProvider):
         if request.response_format == "json":
             payload["format"] = "json"
 
-        # Ollama timeout translation (timeout is handled by requests wrapper)
-        timeout_seconds = request.timeout_ms / 1000.0
-        idle_timeout_seconds = 10.0
-
+        # No timeout — Ollama can take as long as needed
         try:
-            response = requests.post(url, json=payload, stream=True, timeout=(5.0, timeout_seconds))
+            response = requests.post(url, json=payload, stream=True, timeout=None)
             response.raise_for_status()
             
             raw_text = ""
@@ -61,18 +58,12 @@ class LocalOllamaProvider(AIProvider):
             first_token_received = False
             
             for line in response.iter_lines():
-                current_time = time.perf_counter()
-                
-                # Streaming Watchdog: Abort if tokens are stalling wildly during generation
-                if first_token_received and (current_time - last_token_timestamp > idle_timeout_seconds):
-                    raise TimeoutError(f"Local model generation exceeded configured idle timeout ({idle_timeout_seconds}s stall).")
-                
                 if line:
                     chunk = json.loads(line)
                     if "response" in chunk:
                         raw_text += chunk["response"]
                         first_token_received = True
-                        last_token_timestamp = current_time
+                        last_token_timestamp = time.perf_counter()
                         
                     if chunk.get("done"):
                         prompt_tokens = chunk.get("prompt_eval_count", 0)
@@ -110,18 +101,6 @@ class LocalOllamaProvider(AIProvider):
                 error=None
             )
 
-        except (requests.exceptions.Timeout, TimeoutError) as e:
-            latency = int((time.perf_counter() - start_time) * 1000)
-            msg = "Local model generation exceeded configured idle timeout."
-            return AIResponse(
-                raw_output="",
-                model_name=self.model,
-                provider_name=self.provider_name,
-                latency_ms=latency,
-                success=False,
-                error=msg,
-                error_type="TIMEOUT"
-            )
         except requests.exceptions.RequestException as e:
             latency = int((time.perf_counter() - start_time) * 1000)
             return AIResponse(

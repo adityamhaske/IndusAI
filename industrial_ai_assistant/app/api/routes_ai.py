@@ -30,6 +30,91 @@ def get_ai_gateway_health():
     return gateway.get_health()
 
 
+# ── POST /api/ai/test-connection ───────────────────────────────────────────────
+
+class TestConnectionRequest(BaseModel):
+    provider: str = "local_ollama"  # "local_ollama" | "openai" | "gemini"
+
+@router.post("/test-connection", tags=["AI"])
+def test_ai_connection(body: TestConnectionRequest):
+    """Live 1-token generation test against a specific provider.
+    Returns: {status, provider, latency_ms, model, error}"""
+    from app.models.ai_models import AIRequest, AIResponse
+    gateway = get_container().ai_gateway
+    
+    provider_id = body.provider
+    if provider_id == "local":
+        provider_id = "local_ollama"
+    
+    # Check if provider exists in registry
+    provider = gateway.providers.get(provider_id)
+    if not provider:
+        return JSONResponse(content={
+            "status": "failed",
+            "provider": provider_id,
+            "latency_ms": 0,
+            "model": None,
+            "error": f"Provider '{provider_id}' not in registry. Active: {list(gateway.providers.keys())}",
+        })
+    
+    t0 = time.perf_counter()
+    try:
+        req = AIRequest(prompt="Reply with exactly: OK", max_tokens=5, response_format="text")
+        req.timeout_ms = 3000
+        res = provider.generate(req)
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        
+        if res.success:
+            return JSONResponse(content={
+                "status": "connected",
+                "provider": provider_id,
+                "latency_ms": latency_ms,
+                "model": res.model_name,
+                "error": None,
+            })
+        else:
+            return JSONResponse(content={
+                "status": "failed",
+                "provider": provider_id,
+                "latency_ms": latency_ms,
+                "model": res.model_name,
+                "error": res.error,
+            })
+    except Exception as exc:
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        logger.exception("test-connection failed for '%s'", provider_id)
+        return JSONResponse(content={
+            "status": "failed",
+            "provider": provider_id,
+            "latency_ms": latency_ms,
+            "model": None,
+            "error": str(exc),
+        })
+
+
+# ── GET /api/ai/providers ─────────────────────────────────────────────────────
+
+@router.get("/providers", tags=["AI"])
+def get_providers():
+    """Returns current provider registry state for diagnostics."""
+    gateway = get_container().ai_gateway
+    providers_info = {}
+    for key, prov in gateway.providers.items():
+        providers_info[key] = {
+            "provider_name": getattr(prov, "provider_name", key),
+            "provider_type": getattr(prov, "provider_type", "unknown"),
+            "model": getattr(prov, "model", "unknown"),
+            "has_api_key": bool(getattr(prov, "api_key", None)),
+        }
+    return {
+        "primary": gateway.policy.primary,
+        "secondary": gateway.policy.secondary,
+        "registered_providers": providers_info,
+        "circuit_state": gateway.circuit_state.value,
+        "speculative_fallback": gateway.enable_speculative_fallback,
+    }
+
+
 # ── GET /api/ai/metrics ────────────────────────────────────────────────────────
 
 @router.get("/metrics", tags=["AI"])

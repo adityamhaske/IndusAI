@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Cpu, WifiOff, RefreshCw, Database, RotateCcw, ShieldCheck } from 'lucide-react';
+import { Cpu, WifiOff, RefreshCw, Database, RotateCcw, ShieldCheck, FolderOpen, ChevronDown } from 'lucide-react';
 import systemApi from '../../services/systemApi';
 import { getProjectStatus } from '../../services/knowledgeApi';
 import useAppStore from '../../store/useAppStore';
@@ -12,9 +12,19 @@ function llmLabel(health) {
 
 const Header = ({ title }) => {
     const [health, setHealth] = useState(null);
+    const [projects, setProjects] = useState([]);
+    const [activeProject, setActiveProject] = useState(localStorage.getItem('activeProjectId') || 'default');
     const knowledgeStatus = useAppStore(s => s.knowledgeStatus);
     const setKnowledgeStatus = useAppStore(s => s.setKnowledgeStatus);
     const resetAll = useAppStore(s => s.resetAll);
+
+    const fetchProjects = useCallback(async () => {
+        try {
+            const r = await fetch('/api/projects');
+            const data = await r.json();
+            if (Array.isArray(data) && data.length > 0) setProjects(data);
+        } catch { /* silent */ }
+    }, []);
 
     const fetchAll = useCallback(async () => {
         try {
@@ -29,9 +39,17 @@ const Header = ({ title }) => {
 
     useEffect(() => {
         fetchAll();
+        fetchProjects();
         const t = setInterval(fetchAll, 30_000);
         return () => clearInterval(t);
-    }, [fetchAll]);
+    }, [fetchAll, fetchProjects]);
+
+    const handleProjectSwitch = (pid) => {
+        setActiveProject(pid);
+        localStorage.setItem('activeProjectId', pid);
+        // Reload knowledge status for the new project
+        getProjectStatus(pid).then(s => setKnowledgeStatus(s)).catch(() => { });
+    };
 
     const handleReset = async () => {
         if (!window.confirm('Reset all? This clears chat history, project index, and fault data.')) return;
@@ -70,6 +88,30 @@ const Header = ({ title }) => {
             {/* Left */}
             <div className="flex items-center gap-4 min-w-0">
                 <h1 className="text-base font-semibold text-industrial-800 truncate">{title}</h1>
+                <div className="h-4 w-px bg-industrial-200 hidden md:block flex-shrink-0" />
+
+                {/* Project Selector */}
+                <div className="hidden md:flex items-center gap-1 relative">
+                    <FolderOpen className="w-3.5 h-3.5 text-industrial-400 flex-shrink-0" />
+                    <select
+                        value={activeProject}
+                        onChange={e => handleProjectSwitch(e.target.value)}
+                        className="text-xs text-industrial-700 bg-transparent border-none outline-none cursor-pointer pr-4 font-medium max-w-[140px] truncate appearance-none"
+                    >
+                        {projects.length === 0 ? (
+                            <option value="default">default</option>
+                        ) : (
+                            projects.map(p => (
+                                <option key={p.id} value={p.id}>
+                                    {p.name || p.id}
+                                    {p.index_status === 'READY' ? ' ✓' : p.index_status === 'VECTOR_MISSING' ? ' ⚠' : ''}
+                                </option>
+                            ))
+                        )}
+                    </select>
+                    <ChevronDown className="w-3 h-3 text-industrial-400 flex-shrink-0 pointer-events-none -ml-3" />
+                </div>
+
                 <div className="h-4 w-px bg-industrial-200 hidden md:block flex-shrink-0" />
                 <div className={`hidden md:flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border font-medium flex-shrink-0 ${loaded ? 'bg-green-50 text-green-700 border-green-200' : 'bg-yellow-50 text-yellow-700 border-yellow-200'
                     }`}>

@@ -1,5 +1,5 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import { Trash2, BarChart3, RefreshCw } from 'lucide-react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { Trash2, BarChart3, RefreshCw, Database, ChevronDown } from 'lucide-react';
 import { faultApi } from '../services/faultApi';
 import systemApi from '../services/systemApi';
 import UploadZone from '../components/dashboard/UploadZone';
@@ -18,6 +18,49 @@ const LogsPage = () => {
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [uploadError, setUploadError] = useState(null);
     const [systemStatus, setSystemStatus] = useState(null);
+    const [telemetryDatasets, setTelemetryDatasets] = useState([]);
+    const [selectedDataset, setSelectedDataset] = useState('__upload__');
+    const [loadingDataset, setLoadingDataset] = useState(false);
+
+    // Fetch saved telemetry datasets for the active project
+    const fetchTelemetry = useCallback(async () => {
+        try {
+            const pid = localStorage.getItem('activeProjectId') || 'default';
+            const r = await fetch(`/api/projects/${pid}/telemetry`);
+            const data = await r.json();
+            if (Array.isArray(data)) setTelemetryDatasets(data);
+        } catch { /* silent */ }
+    }, []);
+
+    useEffect(() => { fetchTelemetry(); }, [fetchTelemetry]);
+
+    const handleDatasetSelect = useCallback(async (val) => {
+        setSelectedDataset(val);
+        if (val === '__upload__') return;
+        setLoadingDataset(true);
+        setUploadError(null);
+        try {
+            // Load existing dataset by its stored file_path
+            const r = await fetch('/api/faults/load-dataset', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ file_path: val }),
+            });
+            if (r.ok) {
+                const result = await r.json();
+                setUploadInfo(result);
+                const s = await faultApi.summary();
+                setSummary(s);
+            } else {
+                const err = await r.json();
+                setUploadError(err.message || 'Failed to load dataset');
+            }
+        } catch (e) {
+            setUploadError(`Load failed: ${e.message}`);
+        } finally {
+            setLoadingDataset(false);
+        }
+    }, []);
 
     // ── Upload ──────────────────────────────────────────────────────────────────
     const handleUpload = useCallback(async (file) => {
@@ -124,7 +167,35 @@ const LogsPage = () => {
                             </button>
                         )}
                     </div>
-                    <UploadZone onUpload={handleUpload} isLoading={isUploading} uploadInfo={uploadInfo} />
+                    {/* Telemetry Source Selector */}
+                    {telemetryDatasets.length > 0 && (
+                        <div className="mb-4 flex items-center gap-3">
+                            <Database className="w-4 h-4 text-industrial-400 flex-shrink-0" />
+                            <span className="text-sm text-industrial-600 font-medium flex-shrink-0">Telemetry Source:</span>
+                            <div className="relative flex-1 max-w-xs">
+                                <select
+                                    value={selectedDataset}
+                                    onChange={e => handleDatasetSelect(e.target.value)}
+                                    disabled={loadingDataset}
+                                    className="w-full text-sm border border-industrial-200 rounded-lg px-3 py-1.5 text-industrial-700 bg-white focus:outline-none focus:border-primary-400 appearance-none pr-8 disabled:opacity-50"
+                                >
+                                    {telemetryDatasets.map(d => (
+                                        <option key={d.id} value={d.file_path}>
+                                            {d.file_name} {d.row_count > 0 ? `(${d.row_count.toLocaleString()} rows)` : ''}
+                                        </option>
+                                    ))}
+                                    <option value="__upload__">📤 Upload New...</option>
+                                </select>
+                                <ChevronDown className="w-4 h-4 text-industrial-400 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                            </div>
+                            {loadingDataset && <span className="text-xs text-industrial-400 animate-pulse">Loading…</span>}
+                        </div>
+                    )}
+
+                    {/* Show UploadZone only when 'Upload New' is selected or no saved datasets */}
+                    {(selectedDataset === '__upload__' || telemetryDatasets.length === 0) && (
+                        <UploadZone onUpload={handleUpload} isLoading={isUploading} uploadInfo={uploadInfo} />
+                    )}
                     {uploadError && (
                         <div className="mt-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
                             {uploadError}

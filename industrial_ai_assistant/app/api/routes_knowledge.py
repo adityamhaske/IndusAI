@@ -53,6 +53,7 @@ class KnowledgeQueryRequest(BaseModel):
     selected_files: list[str] = Field(default_factory=list)
     selected_folders: list[str] = Field(default_factory=list)
     scope_mode: Literal["STRICT", "PREFER", "GLOBAL"] = "GLOBAL"
+    session_id: str = Field(default="")   # Optional: pass existing session_id to append to it
 
 
 class StructuredHitOut(BaseModel):
@@ -80,6 +81,7 @@ class KnowledgeQueryResponse(BaseModel):
     context_scope: dict[str, Any] = Field(default_factory=dict)
     llm_latency_ms: float = 0.0
     total_latency_ms: float = 0.0
+    session_id: str = Field(default="")   # returned so frontend can link messages to this session
 
 
 # ── Unified endpoint ───────────────────────────────────────────────────────────
@@ -153,7 +155,7 @@ def _route_project(body: KnowledgeQueryRequest, t_start: float) -> KnowledgeQuer
         except Exception:
             pass  # If answer is plain text, use it as summary
 
-        return KnowledgeQueryResponse(
+        resp = KnowledgeQueryResponse(
             question=body.question,
             project_id=body.project_id,
             knowledge_mode=KNOWLEDGE_MODE_PROJECT,
@@ -174,6 +176,36 @@ def _route_project(body: KnowledgeQueryRequest, t_start: float) -> KnowledgeQuer
             llm_latency_ms=result.llm_latency_ms,
             total_latency_ms=round(total_ms, 1),
         )
+
+        # ── Auto-persist session (fire-and-forget, never breaks query) ──
+        try:
+            from app.config.dependency_injection import get_container
+            hs = get_container().history_service
+            session_id = body.session_id or None
+            conf_float = {"HIGH": 0.85, "MEDIUM": 0.55, "LOW": 0.25}.get(result.confidence, 0.5)
+            if session_id:
+                hs.append_message(session_id, "user", body.question)
+                hs.append_message(session_id, "assistant", summary)
+                hs.complete_session(session_id, latency_ms=int(total_ms), confidence_score=conf_float)
+            else:
+                title = body.question[:60] + ("…" if len(body.question) > 60 else "")
+                gateway = get_container().ai_gateway
+                provider = gateway.policy.primary
+                sess = hs.create_session(
+                    session_type="chat",
+                    title=title,
+                    provider=provider,
+                    project_id=body.project_id,
+                )
+                hs.append_message(sess.id, "user", body.question)
+                hs.append_message(sess.id, "assistant", summary)
+                hs.complete_session(sess.id, latency_ms=int(total_ms), confidence_score=conf_float)
+                session_id = sess.id
+            resp.session_id = session_id or ""
+        except Exception as _pe:
+            logger.warning("Session persist failed (non-fatal): %s", _pe)
+
+        return resp
 
     except (ProjectNotReadyError, ProjectStaleError) as exc:
         return JSONResponse(
