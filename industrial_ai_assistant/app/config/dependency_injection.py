@@ -134,6 +134,10 @@ class Container:
 
     # Accessors
     @property
+    def db_client(self):
+        return self._db_client
+
+    @property
     def ai_gateway(self) -> AIGatewayService:
         return self._llm_gateway
         

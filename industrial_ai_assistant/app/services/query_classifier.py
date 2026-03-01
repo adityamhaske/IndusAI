@@ -125,12 +125,20 @@ def classify(query: str) -> QueryIntent:
     # ── Strict Intent Hierarchy Selection ─────────────────────────────────────
     intent_type = IntentType.GENERAL_QUERY.value
     
-    if re.search(r"\b(explain|describe|summarize).*(file|document)\b|\.[a-zA-Z0-9]{2,4}\b", q):
+    # Phase 21: Expanded intent classification (order matters — most specific first)
+    if re.search(r"\b(summarize|overview|explain document|summary of|describe the document)\b", q):
+        intent_type = IntentType.DOCUMENT_SUMMARY.value
+    elif re.search(r"\b(root cause|investigate|deep dive|why does.*fail|why did.*fail|fundamental|underlying)\b", q):
+        intent_type = IntentType.ROOT_CAUSE_DEEP_DIVE.value
+    elif re.search(r"\b(trend|pattern|increasing|decreasing|over time|weekly|daily|recurring|frequency|how often)\b", q):
+        intent_type = IntentType.TREND_ANALYSIS.value
+    elif re.search(r"\b(explain|describe|summarize).*(file|document)\b|\.[a-zA-Z0-9]{2,4}\b", q):
         intent_type = IntentType.FILE_EXPLANATION.value
     elif re.search(r"\b(fault|alarm|error|diagnostic|issue|failed|alm_\d+|err_\d+|trip|why did)\b", q):
         intent_type = IntentType.FAULT_ANALYSIS.value
     elif re.search(r"\b(flow|routine|sequence|ladder|sfc|state machine|architecture|process|how does|what does)\b", q):
         intent_type = IntentType.SYSTEM_FLOW.value
+
 
     return QueryIntent(
         labels=matched,

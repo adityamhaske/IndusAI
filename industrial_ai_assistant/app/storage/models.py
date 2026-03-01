@@ -150,3 +150,42 @@ class PLCAnalysisSnapshot(Base):
     created_at       = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("ChatSession", back_populates="plc_snapshots")
+
+
+# ── Phase 21: Fault Statistical Memory ──────────────────────────────────────────
+
+class FaultHistory(Base):
+    """
+    Persistent statistical memory per fault_code + machine_id.
+    Updated on every PLC analysis. Enables pattern-aware reasoning.
+    """
+    __tablename__ = "fault_history"
+
+    id                = Column(String,   primary_key=True, default=_uuid)
+    project_id        = Column(String,   nullable=True)
+    machine_id        = Column(String,   nullable=False)
+    fault_code        = Column(String,   nullable=False)
+    total_occurrences = Column(Integer,  default=0)
+    last_7d_count     = Column(Integer,  default=0)
+    last_30d_count    = Column(Integer,  default=0)
+    time_cluster_json = Column(Text,     nullable=True)    # JSON: {"00": 2, "14": 17, ...}
+    co_occurrence_json= Column(Text,     nullable=True)    # JSON: {"FAULT_512": 8, ...}
+    last_seen         = Column(DateTime, nullable=True)
+    updated_at        = Column(DateTime, default=datetime.utcnow)
+
+
+class FaultExperience(Base):
+    """
+    Self-improving explanation index.
+    Stores past AI explanations for re-injection on repeat queries.
+    """
+    __tablename__ = "fault_experiences"
+
+    id                  = Column(String,   primary_key=True, default=_uuid)
+    project_id          = Column(String,   nullable=True)
+    fault_code          = Column(String,   nullable=False)
+    machine_id          = Column(String,   nullable=True)
+    explanation_text    = Column(Text,     nullable=False)
+    confidence          = Column(Float,    default=0.0)
+    retrieval_score_avg = Column(Float,    nullable=True)
+    created_at          = Column(DateTime, default=datetime.utcnow)

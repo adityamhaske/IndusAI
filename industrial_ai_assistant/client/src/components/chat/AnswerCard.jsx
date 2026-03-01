@@ -74,18 +74,32 @@ function Collapsible({ title, children }) {
 const AnswerCard = ({ data }) => {
     const intentType = data.intent_type || 'GENERAL_QUERY';
 
-    // Parse the inner Pydantic JSON string
+    // Parse the inner Pydantic JSON string OR use top-level summary
     let parsed = {};
-    if (typeof data.answer === 'string' && data.answer.trim().startsWith('{')) {
+    const answerSource = data.answer || data.summary || '';
+    if (typeof answerSource === 'string' && answerSource.trim().startsWith('{')) {
         try {
-            parsed = JSON.parse(data.answer);
+            parsed = JSON.parse(answerSource);
         } catch {
-            parsed = { explanation: data.answer }; // Fallback
+            parsed = { explanation: answerSource, summary: answerSource }; // Fallback
         }
+    } else if (typeof answerSource === 'object') {
+        parsed = answerSource;
     } else {
-        // Just in case it's already an object
-        parsed = typeof data.answer === 'object' ? data.answer : { explanation: String(data.answer || '') };
+        parsed = { explanation: String(answerSource || ''), summary: String(answerSource || '') };
     }
+
+    // Ensure both summary and explanation exist for any rendering path
+    if (!parsed.explanation && parsed.summary) parsed.explanation = parsed.summary;
+    if (!parsed.summary && parsed.explanation) parsed.summary = parsed.explanation;
+
+    // Inject top-level response fields that AnswerCard may use
+    if (!parsed.summary && data.summary) parsed.summary = data.summary;
+    if (!parsed.explanation && data.summary) parsed.explanation = data.summary;
+    if (!parsed.root_causes && data.root_causes) parsed.root_causes = data.root_causes;
+    if (!parsed.recommended_actions && data.recommended_actions) parsed.recommended_actions = data.recommended_actions;
+    if (!parsed.supporting_evidence && data.supporting_evidence) parsed.supporting_evidence = data.supporting_evidence;
+    if (!parsed.limitations && data.limitations) parsed.limitations = data.limitations;
 
     // Merge structured hits and documentation sources into evidence for all schemas
     const structuredEvidence = (data.structured_hits || []).map(h =>

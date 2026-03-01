@@ -1,21 +1,26 @@
 """
-FaultAnalysisOrchestrator — Central coordinator for fault analysis.
+FaultAnalysisOrchestrator — Central coordinator for fault analysis (Phase 21).
 
-Pipeline:
-  1. Get FaultRecord + deterministic stats from FaultService
-  2. Call RAGService to retrieve relevant documentation
-  3. Build structured prompt (fault context + stats + docs + question)
-  4. Call LLM via LLMInterface
-  5. Parse structured JSON output into StructuredLLMOutput
-  6. Retry once if parsing fails
-  7. Validate with FaultResponseValidator (hallucination check, schema)
-  8. Return FaultAnalysisV2Response
+Pipeline (v4 — Intelligence Upgrade):
+  1. Preflight connectivity check
+  2. Load dataset & row + deterministic stats
+  3. Record into Fault Memory (persistent pattern store)
+  4. RAG retrieval (hybrid: BM25 + Vector + RRF)
+  5. Check Intelligent Cache → return if hit
+  6. Retrieve historical pattern + past experience
+  7. Build structured prompt via PromptComposerV2
+  8. Call LLM via AIGateway (with retry)
+  9. Compute ConfidenceV2 (numeric 0-100%%)
+ 10. Store experience in FaultExperienceIndex
+ 11. Store in Intelligent Cache
+ 12. Validate + return FaultAnalysisV2Response
 
 Design principles:
-  - LLM NEVER computes confidence (that's fault_confidence.py)
+  - LLM NEVER computes confidence (that's confidence_v2.py)
   - LLM NEVER receives raw CSV
   - RAG is non-blocking: empty results → continue with stats only
   - Full observability: timing breakdowns in every response
+  - Self-improving: every analysis feeds the experience index
 """
 import json
 import logging
@@ -46,6 +51,9 @@ from app.services.fault_response_validator import FaultResponseValidator
 from app.services.fault_service import FaultService, get_fault_service
 from app.services.rag_service import RAGService
 from app.utils.fault_confidence import compute_confidence
+from app.utils.confidence_v2 import compute_confidence_v2
+from app.prompts.prompt_v2 import PromptComposerV2
+from app.services.intelligent_cache import get_intelligent_cache
 from app.utils.fault_statistics import (
     _timestamps_for_code,
     check_metric_integrity,
@@ -59,6 +67,28 @@ logger = logging.getLogger(__name__)
 
 # Debug prompt logging — set DEBUG_LLM=true in env to log full prompts
 _DEBUG_LLM = os.getenv("DEBUG_LLM", "false").lower() in ("1", "true", "yes")
+
+# ── Phase 21: Lazy-init singletons ────────────────────────────────────────────
+
+_fault_memory_instance = None
+_fault_experience_instance = None
+
+
+def _get_fault_memory(db_client):
+    global _fault_memory_instance
+    if _fault_memory_instance is None:
+        from app.services.fault_memory import FaultMemoryService
+        _fault_memory_instance = FaultMemoryService(db_client)
+    return _fault_memory_instance
+
+
+def _get_fault_experience(db_client):
+    global _fault_experience_instance
+    if _fault_experience_instance is None:
+        from app.services.fault_experience_index import FaultExperienceIndex
+        _fault_experience_instance = FaultExperienceIndex(db_client)
+    return _fault_experience_instance
+
 
 _LLM_JSON_SCHEMA = """{
   "diagnosis": "<Max 3 lines. Concise. No filler. No speculations.>",
@@ -189,7 +219,28 @@ class FaultAnalysisOrchestrator:
             "integrity_passed": integrity_passed
         }
 
-        # ── Step 3: RAG retrieval ─────────────────────────────────────────────
+        # ── Step 3: Record into Fault Memory (Phase 21) ───────────────────────
+        historical_pattern = None
+        past_experience = None
+        try:
+            from app.config.dependency_injection import get_container
+            container = get_container()
+            fault_mem = _get_fault_memory(container.db_client)
+            fault_mem.record_fault(
+                machine_id=device,
+                fault_code=fault_code,
+                timestamp=ref_ts,
+                co_occurring_fault=co_fault,
+                project_id=request.project_id,
+            )
+            historical_pattern = fault_mem.get_pattern_summary(fault_code, machine_id=device)
+
+            exp_idx = _get_fault_experience(container.db_client)
+            past_experience = exp_idx.get_best_experience(fault_code, machine_id=device)
+        except Exception as mem_exc:
+            logger.warning("Phase 21 memory layer failed (non-fatal): %s", mem_exc)
+
+        # ── Step 4: RAG retrieval (hybrid: BM25 + Vector + RRF) ──────────────
         rag_docs, rag_ms = self._rag.retrieve_for_fault(
             fault_code=fault_code,
             fault_message=message,
@@ -198,24 +249,21 @@ class FaultAnalysisOrchestrator:
             project_id=request.project_id,
         )
 
-        # ── Step 4: Build prompt & Check Integrity ────────────────────────────
+        # ── Step 4b: Integrity Check ──────────────────────────────────────────
         if not integrity_passed:
-            logger.warning("Stat integrity failed or sample-size trace too small for row %d. Bypassing LLM.", request.row_id)
+            logger.warning("Stat integrity failed for row %d. Bypassing LLM.", request.row_id)
             total_ms = (time.perf_counter() - t_total_start) * 1000
-            
-            # Construct a synthetic successful response masking the LLM output
             synthetic_evidence = {
                 "occurrences_1h": occ_1h,
                 "occurrences_24h": occ_24h,
                 "burst_detected": burst,
-                "burst_window_minutes": ds.stats_cache.get("burst_window_minutes", 10.0), # Defaulting from stats engine
+                "burst_window_minutes": ds.stats_cache.get("burst_window_minutes", 10.0),
                 "burst_count": burst_count,
                 "co_occurrence": [{"fault": co_fault, "count": co_count}] if co_fault else [],
                 "trend": trend
             }
-
             return FaultAnalysisV2Response(
-                analysis_version="v3.0",
+                analysis_version="v4.0",
                 dataset_hash=ds.dataset_hash,
                 row_id=request.row_id,
                 fault_code=fault_code,
@@ -236,47 +284,83 @@ class FaultAnalysisOrchestrator:
                 total_latency_ms=round(total_ms, 1),
             )
 
-        # Classify Intent for Dynamic Schema Routing
+        # ── Step 5: Check Intelligent Cache (Phase 21) ────────────────────────
+        cache = get_intelligent_cache()
+        context_ids = [d.source_file for d in rag_docs]
+        cache_key = cache.build_key(
+            query=request.question or f"analyze_{fault_code}",
+            context_ids=context_ids,
+            stats_snapshot={"occ_1h": occ_1h, "occ_24h": occ_24h, "burst": burst, "trend": trend},
+        )
+        cached = cache.get(cache_key)
+        if cached is not None:
+            logger.info("Cache HIT for fault=%s row=%d — returning cached response", fault_code, request.row_id)
+            return cached
+
+        # ── Step 6: Classify Intent + Build PromptV2 ─────────────────────────
         intent_val = IntentType.FAULT_ANALYSIS.value
         if request.question:
             intent_result = classify(request.question)
             intent_val = intent_result.intent_type
 
-        is_fault_intent = (intent_val == IntentType.FAULT_ANALYSIS.value)
+        is_fault_intent = intent_val in (
+            IntentType.FAULT_ANALYSIS.value,
+            IntentType.ROOT_CAUSE_DEEP_DIVE.value,
+        )
         schema_model = StructuredLLMOutput if is_fault_intent else FlexibleLLMOutput
-        schema_text = _LLM_JSON_SCHEMA if is_fault_intent else _FLEXIBLE_JSON_SCHEMA
 
-        prompt = _build_prompt(
-            row_id=request.row_id,
-            fault_code=fault_code,
-            device=device,
-            ref_ts=ref_ts,
-            severity=severity,
-            message=message,
-            occ_1h=occ_1h,
-            occ_24h=occ_24h,
-            co_fault=co_fault,
-            co_count=co_count,
-            burst_detected=burst,
-            burst_desc=burst_desc,
-            burst_count=burst_count,
-            trend=trend,
-            confidence=confidence,
-            docs=rag_docs,
-            user_question=request.question,
-            schema_text=schema_text,
-            is_fault_intent=is_fault_intent,
+        # Format stats for prompt
+        stats_text = (
+            f"Occurrences (1h): {occ_1h}\n"
+            f"Occurrences (24h): {occ_24h}\n"
+            f"Co-occurring fault: {co_fault} ({co_count} times)\n"
+            f"Burst detected: {burst} ({burst_desc})\n"
+            f"Trend: {trend}\n"
+            f"Anomaly score: {anomaly_score:.2f}\n"
+            f"Integrity: {'PASSED' if integrity_passed else 'FAILED'}"
+        )
+
+        fault_ctx = (
+            f"Row ID: {request.row_id}\n"
+            f"Fault Code: {fault_code}\n"
+            f"Device: {device}\n"
+            f"Severity: {severity}\n"
+            f"Message: {message}\n"
+            f"Timestamp: {ref_ts.isoformat()}"
+        )
+
+        docs_text = None
+        if rag_docs:
+            doc_parts = []
+            for i, d in enumerate(rag_docs, 1):
+                score_str = f" (relevance: {d.relevance_score:.4f})" if d.relevance_score else ""
+                doc_parts.append(
+                    f"--- Document {i}{score_str} ---\n"
+                    f"Source: {d.source_file}\n"
+                    f"Section: {d.section_title or 'N/A'}\n"
+                    f"Content:\n{d.content[:2000]}"
+                )
+            docs_text = "\n\n".join(doc_parts)
+
+        prompt = PromptComposerV2.compose(
+            intent_type=intent_val,
+            user_query=request.question or f"Analyze fault {fault_code} on {device}",
+            statistical_snapshot=stats_text,
+            historical_pattern=historical_pattern,
+            past_experience=past_experience,
+            manual_sections=docs_text,
+            fault_context=fault_ctx,
         )
 
         if _DEBUG_LLM:
-            logger.debug("[DEBUG_LLM] Full prompt:\n%s", prompt)
+            logger.debug("[DEBUG_LLM] Full PromptV2:\n%s", prompt)
 
-        # Telemetry calculation for L9 review:
+        # Telemetry
         prompt_len = len(prompt)
         doc_len = sum(len(d.content) for d in rag_docs)
         retrieval_coverage_score = (doc_len / prompt_len) if prompt_len > 0 else 0.0
 
-        # ── Step 5: LLM call (with retry) ────────────────────────────────────
+        # ── Step 7: LLM call (with retry) ────────────────────────────────────
         t_llm_start = time.perf_counter()
         llm_output, is_fallback, raw_output = self._call_llm_with_retry(
             prompt, 
@@ -287,7 +371,7 @@ class FaultAnalysisOrchestrator:
         )
         llm_ms = (time.perf_counter() - t_llm_start) * 1000
 
-        # ── Step 6: Validation ────────────────────────────────────────────────
+        # ── Step 8: Validation ────────────────────────────────────────────────
         doc_sources = [d.source_file for d in rag_docs]
         
         if llm_output is not None:
@@ -307,26 +391,46 @@ class FaultAnalysisOrchestrator:
                 evidence_data = cleaned.metrics
                 final_confidence = cleaned.confidence or confidence
         else:
-            # L9 JSON Resiliency fallback
-            logger.error("JSON parsing failed entirely for row %d. Degrading to raw text display.", request.row_id)
+            logger.error("JSON parsing failed entirely for row %d. Degrading to raw text.", request.row_id)
             diagnosis_text = f"[STRUCTURED PARSE FAILED - RAW OUTPUT]\n{raw_output}"
             action_text = "Manual Review Required - AI Response was malformed."
-            evidence_data = statistics # Fallback to deterministic stats
+            evidence_data = statistics
             final_confidence = "LOW"
             hallucinated = []
             val_warnings = ["LLM response was not valid JSON. Returned raw text instead."]
 
+        # ── Step 9: Confidence V2 (numeric 0-100%) ───────────────────────────
+        retrieval_scores = [d.relevance_score for d in rag_docs if d.relevance_score]
+        confidence_numeric, confidence_label = compute_confidence_v2(
+            retrieval_scores=retrieval_scores,
+            historical_match=(historical_pattern is not None),
+            context_coverage_ratio=retrieval_coverage_score,
+            anomaly_score=anomaly_score,
+            output_length=len(diagnosis_text) if diagnosis_text else 0,
+        )
+        # Use V2 label as the public-facing confidence
+        final_confidence = confidence_label
+
+        # ── Step 10: Store Experience (Phase 21 — self-improving) ────────────
+        try:
+            if diagnosis_text and not diagnosis_text.startswith("["):
+                exp_idx = _get_fault_experience(get_container().db_client)
+                exp_idx.store_experience(
+                    fault_code=fault_code,
+                    explanation_text=diagnosis_text,
+                    confidence=confidence_numeric,
+                    machine_id=device,
+                    project_id=request.project_id,
+                    retrieval_score_avg=sum(retrieval_scores) / len(retrieval_scores) if retrieval_scores else None,
+                )
+        except Exception as exp_exc:
+            logger.warning("Experience store failed (non-fatal): %s", exp_exc)
+
         total_ms = (time.perf_counter() - t_total_start) * 1000
 
-        logger.info(
-            "Analysis complete: fault=%s row=%d confidence=%s docs=%d "
-            "rag=%.0fms llm=%.0fms total=%.0fms",
-            fault_code, request.row_id, confidence, len(rag_docs),
-            rag_ms, llm_ms, total_ms,
-        )
-
-        return FaultAnalysisV2Response(
-            analysis_version="v3.0",
+        # ── Step 11: Build & Cache Response ───────────────────────────────────
+        response = FaultAnalysisV2Response(
+            analysis_version="v4.0",
             dataset_hash=ds.dataset_hash,
             row_id=request.row_id,
             fault_code=fault_code,
@@ -335,7 +439,7 @@ class FaultAnalysisOrchestrator:
             user_question=request.question,
             confidence=final_confidence,
             statistics=statistics,
-            evidence=evidence_data,  # Maps clean nested v3 metrics structure
+            evidence=evidence_data,
             diagnosis=diagnosis_text,
             primary_action=action_text,
             docs_used=len(rag_docs),
@@ -346,6 +450,22 @@ class FaultAnalysisOrchestrator:
             rag_latency_ms=round(rag_ms, 1),
             total_latency_ms=round(total_ms, 1),
         )
+
+        cache.put(cache_key, response)
+
+        # ── Observability (Phase 21) ─────────────────────────────────────────
+        logger.info(
+            "Analysis v4 complete: fault=%s row=%d intent=%s confidence=%.0f%%(%s) "
+            "docs=%d cache=MISS rag=%.0fms llm=%.0fms total=%.0fms "
+            "historical=%s experience=%s",
+            fault_code, request.row_id, intent_val,
+            confidence_numeric * 100, confidence_label,
+            len(rag_docs), rag_ms, llm_ms, total_ms,
+            "YES" if historical_pattern else "NO",
+            "YES" if past_experience else "NO",
+        )
+
+        return response
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 

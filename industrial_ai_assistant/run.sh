@@ -27,13 +27,16 @@ if ! command -v ollama &> /dev/null; then
 fi
 
 # Auto-download Qdrant if missing
-if [ ! -f "./qdrant" ] && ! command -v qdrant &> /dev/null; then
-    echo "📦 Qdrant binary not found. Downloading for Mac ARM64..."
-    curl -L -o qdrant-aarch64-apple-darwin.tar.gz "https://github.com/qdrant/qdrant/releases/download/v1.7.4/qdrant-aarch64-apple-darwin.tar.gz"
+if [ ! -f "./bin/qdrant" ] && ! command -v qdrant &> /dev/null; then
+    echo "📦 Qdrant binary not found in ./bin or PATH. Downloading for Mac ARM64..."
+    mkdir -p bin
+    curl -L -o bin/qdrant-aarch64-apple-darwin.tar.gz "https://github.com/qdrant/qdrant/releases/download/v1.7.4/qdrant-aarch64-apple-darwin.tar.gz"
+    cd bin || exit
     tar -xzf qdrant-aarch64-apple-darwin.tar.gz
     rm qdrant-aarch64-apple-darwin.tar.gz
     chmod +x qdrant
-    echo "✅ Qdrant downloaded and extracted."
+    cd ..
+    echo "✅ Qdrant downloaded to bin/"
 fi
 
 # Setup Python venv and install requirements
@@ -65,6 +68,7 @@ lsof -ti:8001,5173,6333,11434 | xargs kill -9 2>/dev/null || true
 
 # ── 3. Boot sequence ──────────────────────────────────────────────────────────
 echo "🚀 Booting up IndusAI Platform..."
+mkdir -p logs
 PIDS=()
 
 cleanup() {
@@ -89,17 +93,17 @@ trap cleanup INT TERM EXIT
 
 # Start Qdrant
 echo "➤ Starting Qdrant (Vector DB)..."
-if [ -f "./qdrant" ]; then
-    ./qdrant > qdrant.log 2>&1 &
+if [ -f "./bin/qdrant" ]; then
+    ./bin/qdrant > logs/qdrant.log 2>&1 &
     PIDS+=($!)
 elif command -v qdrant &> /dev/null; then
-    qdrant > qdrant.log 2>&1 &
+    qdrant > logs/qdrant.log 2>&1 &
     PIDS+=($!)
 fi
 
 # Start Ollama
 echo "➤ Starting Ollama (LLM Engine)..."
-ollama serve > ollama.log 2>&1 &
+ollama serve > logs/ollama.log 2>&1 &
 PIDS+=($!)
 
 # Wait a second for Ollama to spin up
@@ -112,7 +116,7 @@ ollama run llama3.2 "hello" > /dev/null 2>&1 &
 echo "➤ Starting FastAPI Backend..."
 export PYTHONPATH="$(pwd)"
 source venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload > backend.log 2>&1 &
+uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload > logs/backend.log 2>&1 &
 PIDS+=($!)
 
 # Start Frontend
@@ -120,7 +124,7 @@ echo "➤ Starting React Vite Frontend..."
 echo "   ⏳ Waiting 3 seconds for backend DB init..."
 sleep 3
 cd client || exit
-npm run dev > ../frontend.log 2>&1 &
+npm run dev > ../logs/frontend.log 2>&1 &
 PIDS+=($!)
 cd ..
 

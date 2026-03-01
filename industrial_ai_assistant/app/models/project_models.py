@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ── Structured record types ────────────────────────────────────────────────────
@@ -161,6 +161,10 @@ class IntentType(str, Enum):
     FILE_EXPLANATION = "FILE_EXPLANATION"
     SYSTEM_FLOW = "SYSTEM_FLOW"
     GENERAL_QUERY = "GENERAL_QUERY"
+    # Phase 21: New intent types for copilot-grade routing
+    TREND_ANALYSIS = "TREND_ANALYSIS"
+    ROOT_CAUSE_DEEP_DIVE = "ROOT_CAUSE_DEEP_DIVE"
+    DOCUMENT_SUMMARY = "DOCUMENT_SUMMARY"
 
 
 class QueryIntent(BaseModel):
@@ -207,9 +211,30 @@ class FileExplanationResponseModel(BaseModel):
     confidence: Literal["LOW", "MEDIUM", "HIGH"] = "LOW"
 
 class GeneralQueryResponseModel(BaseModel):
-    explanation: str
+    explanation: str = ""
+    summary: str = ""
     supporting_sources: list[str] = Field(default_factory=list)
     confidence: Literal["LOW", "MEDIUM", "HIGH"] = "LOW"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, values):
+        """Accept either 'explanation' or 'summary' from LLM output."""
+        if isinstance(values, dict):
+            expl = values.get("explanation", "")
+            summ = values.get("summary", "")
+            # Also accept 'supporting_evidence' as alias
+            if not values.get("supporting_sources") and values.get("supporting_evidence"):
+                values["supporting_sources"] = values["supporting_evidence"]
+            if expl and not summ:
+                values["summary"] = expl
+            elif summ and not expl:
+                values["explanation"] = summ
+            elif not expl and not summ:
+                # Raw text fallback
+                values["explanation"] = values.get("answer", "") or values.get("response", "")
+                values["summary"] = values["explanation"]
+        return values
 
 
 class ProjectQueryResponse(BaseModel):

@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.orm import sessionmaker, Session
 from app.core.constants import DB_PATH
 from app.storage.models import Base
@@ -14,33 +14,54 @@ class SQLiteClient:
         self._migrate_schema()
 
     def _migrate_schema(self):
-        """Surgical migration for Phase 20+ columns without using Alembic."""
-        from sqlalchemy import text
+        """
+        Comprehensive schema migration for all tables (Phase 21+).
+        Adds missing columns to existing tables without data loss.
+        Uses SQLite ALTER TABLE ADD COLUMN (non-destructive).
+        """
+        inspector = inspect(self.engine)
+        existing_tables = inspector.get_table_names()
+
         with self.engine.connect() as conn:
-            # Check projects table for missing industrial enterprise columns
-            res = conn.execute(text("PRAGMA table_info(projects)"))
-            columns = [row[1] for row in res]
-            
-            # Map of column: type to add
-            needed = {
-                "root_directory": "VARCHAR",
-                "vector_collection_name": "VARCHAR",
-                "embedding_model": "VARCHAR",
-                "embedding_dimension": "INTEGER",
-                "index_version": "VARCHAR",
-                "index_status": "VARCHAR",
-                "last_indexed_at": "DATETIME",
-                "updated_at": "DATETIME",
-            }
-            
-            for col, col_type in needed.items():
-                if col not in columns:
-                    print(f"🔧 Migrating: Adding column {col} to projects table...")
-                    try:
-                        conn.execute(text(f"ALTER TABLE projects ADD COLUMN {col} {col_type}"))
-                        conn.commit()
-                    except Exception as e:
-                        print(f"⚠️ Migration failed for {col}: {e}")
+            for table in Base.metadata.sorted_tables:
+                if table.name not in existing_tables:
+                    continue  # Table is new — create_all() already handles it
+
+                existing_cols = {col["name"] for col in inspector.get_columns(table.name)}
+                model_cols = {col.name: col for col in table.columns}
+
+                for col_name, col_obj in model_cols.items():
+                    if col_name not in existing_cols:
+                        # Determine SQLite type
+                        col_type = str(col_obj.type)
+                        nullable = "NULL" if col_obj.nullable else "NOT NULL"
+                        default = ""
+                        if col_obj.default is not None:
+                            try:
+                                val = col_obj.default.arg
+                                if callable(val):
+                                    default = ""  # Can't set callable defaults in ALTER
+                                elif isinstance(val, str):
+                                    default = f" DEFAULT '{val}'"
+                                elif isinstance(val, bool):
+                                    default = f" DEFAULT {int(val)}"
+                                elif isinstance(val, (int, float)):
+                                    default = f" DEFAULT {val}"
+                            except Exception:
+                                default = ""
+
+                        # SQLite ALTER TABLE ADD COLUMN cannot have NOT NULL without default
+                        if nullable == "NOT NULL" and not default:
+                            nullable = "NULL"
+
+                        sql = f"ALTER TABLE {table.name} ADD COLUMN {col_name} {col_type} {nullable}{default}"
+                        try:
+                            conn.execute(text(sql))
+                            conn.commit()
+                            print(f"🔧 Migrated: {table.name}.{col_name} ({col_type})")
+                        except Exception as e:
+                            if "duplicate column" not in str(e).lower():
+                                print(f"⚠️ Migration skipped {table.name}.{col_name}: {e}")
 
     def get_session(self) -> Session:
         return self.SessionLocal()

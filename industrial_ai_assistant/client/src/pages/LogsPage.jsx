@@ -41,7 +41,7 @@ const LogsPage = () => {
         setUploadError(null);
         try {
             // Load existing dataset by its stored file_path
-            const r = await fetch('/api/faults/load-dataset', {
+            const r = await fetch('/api/fault/load-dataset', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ file_path: val }),

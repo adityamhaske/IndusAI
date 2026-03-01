@@ -191,6 +191,11 @@ class SemanticIndex:
         RRF formula: score = Σ 1/(k + rank)  with k=60.
         """
         k_rrf = 60
+
+        # Auto-warm BM25 from Qdrant if not yet loaded
+        if project_id not in self._chunk_store or len(self._chunk_store.get(project_id, {})) == 0:
+            self.warm_bm25_from_qdrant(project_id)
+
         vector_hits = self.vector_search(query, project_id, top_k=top_k * 2, file_type=file_type, scope_files=scope_files)
         bm25_hits   = self.bm25_search(query, project_id, top_k=top_k * 2, scope_files=scope_files)
 
@@ -218,13 +223,86 @@ class SemanticIndex:
     # ── Utility ───────────────────────────────────────────────────────────────
 
     def collection_size(self, project_id: str) -> int:
-        """Number of chunks indexed for this project."""
-        return len(self._chunk_store.get(project_id, {}))
+        """Number of chunks indexed for this project — queries Qdrant directly."""
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            client = self._get_client()
+            result = client.count(
+                collection_name=_QDRANT_COLLECTION,
+                count_filter=Filter(
+                    must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]
+                ),
+                exact=True,
+            )
+            return result.count
+        except Exception as exc:
+            logger.warning("collection_size query failed: %s", exc)
+            # Fallback to in-memory count
+            return len(self._chunk_store.get(project_id, {}))
 
     def all_source_files(self, project_id: str) -> set[str]:
-        """Return all unique source_file paths that have at least one chunk indexed."""
-        store = self._chunk_store.get(project_id, {})
-        return {chunk.source_file for chunk in store.values() if chunk.source_file}
+        """Return all unique source_file paths — queries Qdrant directly."""
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue, ScrollRequest
+            client = self._get_client()
+            records, _ = client.scroll(
+                collection_name=_QDRANT_COLLECTION,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]
+                ),
+                limit=10000,
+                with_payload=["source_file"],
+                with_vectors=False,
+            )
+            return {r.payload.get("source_file", "") for r in records if r.payload.get("source_file")}
+        except Exception as exc:
+            logger.warning("all_source_files query failed: %s", exc)
+            store = self._chunk_store.get(project_id, {})
+            return {chunk.source_file for chunk in store.values() if chunk.source_file}
+
+    def warm_bm25_from_qdrant(self, project_id: str) -> int:
+        """
+        Rebuild in-process BM25 index from persisted Qdrant data.
+        Call this on startup or first query for a project.
+        Returns number of chunks loaded.
+        """
+        if project_id in self._chunk_store and len(self._chunk_store[project_id]) > 0:
+            return len(self._chunk_store[project_id])  # Already warm
+
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            client = self._get_client()
+            records, _ = client.scroll(
+                collection_name=_QDRANT_COLLECTION,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]
+                ),
+                limit=50000,
+                with_payload=True,
+                with_vectors=False,
+            )
+            count = 0
+            for r in records:
+                p = r.payload or {}
+                chunk_id = p.get("chunk_id", "")
+                content = p.get("content", "")
+                if not chunk_id or not content:
+                    continue
+                fake_chunk = SemanticChunk(
+                    chunk_id=chunk_id,
+                    content=content,
+                    source_file=p.get("source_file", ""),
+                    section_title=p.get("section_title", ""),
+                    file_type=p.get("file_type", ""),
+                    page=p.get("page", 0),
+                )
+                self._bm25_add(project_id, chunk_id, content, fake_chunk)
+                count += 1
+            logger.info("[BM25 warm] Loaded %d chunks from Qdrant for project=%s", count, project_id)
+            return count
+        except Exception as exc:
+            logger.warning("BM25 warm-up failed for project=%s: %s", project_id, exc)
+            return 0
 
     def delete_project(self, project_id: str) -> None:
         """Remove all Qdrant points and BM25 data for this project."""
