@@ -228,6 +228,17 @@ class ProjectContextManager:
                                     duration_ms=0.0
                                 )
                                 logger.info("[%s] Successfully reconstructed project mapping from cache natively.", pid)
+                                
+                                # Phase 20: Sync hydrated state back to DB
+                                try:
+                                    from app.config.dependency_injection import get_container
+                                    ps = get_container().project_service
+                                    ps.update_index_status(
+                                        pid, "READY",
+                                        index_version=meta.project_hash
+                                    )
+                                except Exception as db_sync_err:
+                                    logger.warning("[%s] Failed to sync hydrated state to DB: %s", pid, db_sync_err)
                     except Exception as me:
                         logger.warning("Metadata reconstruction failed for %s: %s", pid, me)
         except Exception as e:
