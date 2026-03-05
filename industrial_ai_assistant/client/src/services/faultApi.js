@@ -33,6 +33,11 @@ export const faultApi = {
         axios.get(`${BASE}/detail`, { params: { row_id: rowId, project_id: projectId } })
             .then(r => r.data),
 
+    /** Deterministic quick stats for dual-engine view */
+    quickStats: (rowId, projectId = 'default') =>
+        axios.get(`${BASE}/quick-stats`, { params: { row_id: rowId, project_id: projectId } })
+            .then(r => r.data),
+
     /** LLM analysis for a row. Optional question enables custom Q&A. */
     analyze: (rowId, question = null, projectId = 'default') =>
         axios.post(`${BASE}/analyze`, {

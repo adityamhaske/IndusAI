@@ -35,28 +35,20 @@ class FaultResponseValidator:
         hallucinated: List[str] = []
 
         # ── 1. Field completeness checks ──────────────────────────────────────
-        if not output.diagnosis or len(output.diagnosis.strip()) < 10:
-            warnings.append("LLM diagnosis is empty or too short.")
+        # ── 1. Field completeness checks ──────────────────────────────────────
+        if not output.fault_summary or len(output.fault_summary.strip()) < 10:
+            warnings.append("LLM fault_summary is empty or too short.")
             if not is_retry:
-                output.diagnosis = "Analysis unavailable — LLM returned insufficient content."
+                output.fault_summary = "Analysis unavailable — LLM returned insufficient content."
 
-        if not output.primary_action:
-            warnings.append("LLM returned no primary action.")
+        if not output.resolution_steps:
+            warnings.append("LLM returned no resolution steps.")
+            if not is_retry:
+                output.resolution_steps = ["Manual Review Required - AI Response was malformed."]
 
-        # ── 2. Tag hallucination check ─────────────────
-        if known_tags and "related_plc_tags" in output.metrics:
-            raw_tags = output.metrics["related_plc_tags"]
-            valid_tags = []
-            for tag in raw_tags:
-                if tag in known_tags:
-                    valid_tags.append(tag)
-                else:
-                    hallucinated.append(tag)
-            output.metrics["related_plc_tags"] = valid_tags
-
-        # ── 3. Truncate overly long free-text fields ──────────────────────────
-        if len(output.diagnosis) > 1000:
-            output.diagnosis = output.diagnosis[:1000] + "…"
-            warnings.append("Diagnosis truncated to 1000 chars.")
+        # ── 2. Truncate overly long free-text fields ──────────────────────────
+        if len(output.fault_summary) > 1000:
+            output.fault_summary = output.fault_summary[:1000] + "…"
+            warnings.append("Summary truncated to 1000 chars.")
 
         return output, hallucinated, warnings

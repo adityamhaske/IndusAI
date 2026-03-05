@@ -38,7 +38,7 @@ from app.models.fault_models import (
     FaultSummaryResponse,
     UploadResponse,
 )
-from app.models.fault_analysis_models import FaultAnalysisRequest, FaultAnalysisV2Response
+from app.models.fault_analysis_models import FaultAnalysisRequest, FaultAnalysisV2Response, QuickStatsResponse
 from app.services.fault_service import MAX_FILE_SIZE_MB, get_fault_service
 from app.utils.schema_normalizer import normalize
 
@@ -180,6 +180,96 @@ def fault_detail(
         return _fault_error(exc, status.HTTP_404_NOT_FOUND)
     except FaultRowNotFoundError as exc:
         return _fault_error(exc, status.HTTP_404_NOT_FOUND)
+
+
+# ── GET /fault/quick-stats ────────────────────────────────────────────────────
+
+@router.get("/quick-stats", response_model=QuickStatsResponse)
+def quick_stats(
+    row_id: int = Query(...),
+    project_id: str = Query(default="default"),
+):
+    """
+    Returns deterministic stats instantly (no LLM, no RAG) for the dual-engine UI.
+    Computes time-windows, bursts, anomalies, and confidence in <100ms.
+    """
+    from app.config.dependency_injection import get_container
+    from app.utils.fault_statistics import (
+        _timestamps_for_code,
+        check_metric_integrity,
+        compute_cooccurrence,
+        compute_occurrences_in_window,
+        compute_rolling_metrics,
+        compute_trend,
+    )
+    from app.utils.fault_confidence import compute_confidence
+    from app.core.fault_exceptions import DatasetNotLoadedError, FaultRowNotFoundError, AnalysisPrerequisiteError
+
+    try:
+        container = get_container()
+        fault_svc = container.fault_orchestrator._fault_svc
+        ds = fault_svc._store.get(project_id)
+        if ds is None:
+            raise DatasetNotLoadedError()
+
+        df = ds.dataframe
+        matches = df[df["row_id"] == row_id]
+        if matches.empty:
+            raise FaultRowNotFoundError(row_id)
+        if not ds.stats_cache:
+            raise AnalysisPrerequisiteError("Stats cache empty — re-upload dataset.")
+
+        row = matches.iloc[0]
+        fault_code = str(row["fault_code"])
+        ref_ts = row["timestamp"].to_pydatetime()
+
+        ts_list = _timestamps_for_code(df, fault_code)
+        
+        occ_1h  = compute_occurrences_in_window(ts_list, ref_ts, hours=1)
+        occ_24h = compute_occurrences_in_window(ts_list, ref_ts, hours=24)
+        co_fault, co_count = compute_cooccurrence(df, ref_ts)
+        burst = ds.stats_cache.get("burst_detected", False)
+        burst_desc = ds.stats_cache.get("burst_description", "")
+        burst_count = ds.stats_cache.get("burst_count", 0)
+        
+        rolling_avg_5m, rolling_avg_1h, delta_last_30m, anomaly_score = compute_rolling_metrics(ts_list, ref_ts)
+        trend = compute_trend(delta_last_30m, rolling_avg_1h)
+        
+        integrity_passed = check_metric_integrity(burst, burst_count, occ_1h, anomaly_score)
+        
+        confidence = compute_confidence(
+            burst_detected=burst,
+            anomaly_score=anomaly_score,
+            integrity_passed=integrity_passed,
+            occurrences_1h=occ_1h
+        )
+
+        return QuickStatsResponse(
+            occurrences_last_hour=occ_1h,
+            occurrences_last_24h=occ_24h,
+            top_cooccurring_fault=co_fault,
+            cooccurrence_count=co_count,
+            burst_detected=burst,
+            burst_description=burst_desc,
+            burst_count=burst_count,
+            confidence=confidence,
+            rolling_avg_5m=rolling_avg_5m,
+            rolling_avg_1h=rolling_avg_1h,
+            delta_last_30m=delta_last_30m,
+            anomaly_score=anomaly_score,
+            trend=trend,
+            integrity_passed=integrity_passed
+        )
+    except (DatasetNotLoadedError, FaultRowNotFoundError) as exc:
+        return _fault_error(exc, status.HTTP_404_NOT_FOUND)
+    except AnalysisPrerequisiteError as exc:
+        return _fault_error(exc, status.HTTP_409_CONFLICT)
+    except Exception as exc:
+        logger.exception("Unexpected error in quick-stats")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error_type": "INTERNAL_ERROR", "message": str(exc)}
+        )
 
 
 # ── POST /fault/analyze ───────────────────────────────────────────────────────

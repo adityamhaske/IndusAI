@@ -239,7 +239,7 @@ const LogsPage = () => {
                     ></div>
 
                     {/* Drawer Panel */}
-                    <div className="relative w-full max-w-[360px] bg-white shadow-2xl h-full flex flex-col animate-slide-in-right border-l border-industrial-200">
+                    <div className="relative w-full max-w-[500px] bg-white shadow-2xl h-full flex flex-col animate-slide-in-right border-l border-industrial-200">
                         <SelectedFaultPanel
                             fault={selectedFault}
                             detail={faultDetail}

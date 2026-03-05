@@ -251,38 +251,7 @@ class FaultAnalysisOrchestrator:
 
         # ── Step 4b: Integrity Check ──────────────────────────────────────────
         if not integrity_passed:
-            logger.warning("Stat integrity failed for row %d. Bypassing LLM.", request.row_id)
-            total_ms = (time.perf_counter() - t_total_start) * 1000
-            synthetic_evidence = {
-                "occurrences_1h": occ_1h,
-                "occurrences_24h": occ_24h,
-                "burst_detected": burst,
-                "burst_window_minutes": ds.stats_cache.get("burst_window_minutes", 10.0),
-                "burst_count": burst_count,
-                "co_occurrence": [{"fault": co_fault, "count": co_count}] if co_fault else [],
-                "trend": trend
-            }
-            return FaultAnalysisV2Response(
-                analysis_version="v4.0",
-                dataset_hash=ds.dataset_hash,
-                row_id=request.row_id,
-                fault_code=fault_code,
-                device=device,
-                timestamp=ref_ts,
-                user_question=request.question,
-                confidence="LOW",
-                statistics=statistics,
-                evidence=synthetic_evidence,
-                diagnosis="DATA INTEGRITY WARNING / INSUFFICIENT SAMPLE. Statistical inconsistency detected. LLM explanation suppressed.",
-                primary_action="Verify telemetry sensor logs and re-index dataset constraints.",
-                docs_used=0,
-                sources=[],
-                hallucinated_tags_removed=[],
-                validation_warnings=["Metric validation blocked LLM inference."],
-                llm_latency_ms=0.0,
-                rag_latency_ms=round(rag_ms, 1),
-                total_latency_ms=round(total_ms, 1),
-            )
+            logger.warning("Stat integrity failed for row %d. LLM will continue but user should manually verify.", request.row_id)
 
         # ── Step 5: Check Intelligent Cache (Phase 21) ────────────────────────
         cache = get_intelligent_cache()
@@ -316,7 +285,7 @@ class FaultAnalysisOrchestrator:
             f"Co-occurring fault: {co_fault} ({co_count} times)\n"
             f"Burst detected: {burst} ({burst_desc})\n"
             f"Trend: {trend}\n"
-            f"Anomaly score: {anomaly_score:.2f}\n"
+            f"Anomaly score: {f'{anomaly_score:.2f}' if anomaly_score is not None else 'N/A'}\n"
             f"Integrity: {'PASSED' if integrity_passed else 'FAILED'}"
         )
 
@@ -376,9 +345,10 @@ class FaultAnalysisOrchestrator:
         
         if llm_output is not None:
             if isinstance(llm_output, FlexibleLLMOutput):
-                diagnosis_text = llm_output.summary
-                action_text = "See key points or documentation for more details."
-                evidence_data = {"key_points": llm_output.key_points}
+                fault_summary = llm_output.summary
+                root_cause = "General query response"
+                trigger_mechanism = "See summary"
+                resolution_steps = llm_output.key_points
                 final_confidence = llm_output.confidence or confidence
                 hallucinated = []
                 val_warnings = []
@@ -386,15 +356,17 @@ class FaultAnalysisOrchestrator:
                 cleaned, hallucinated, val_warnings = self._validator.validate(
                     llm_output, doc_sources, known_tags=None
                 )
-                diagnosis_text = cleaned.diagnosis
-                action_text = cleaned.primary_action
-                evidence_data = cleaned.metrics
+                fault_summary = cleaned.fault_summary
+                root_cause = cleaned.root_cause
+                trigger_mechanism = cleaned.trigger_mechanism
+                resolution_steps = cleaned.resolution_steps
                 final_confidence = cleaned.confidence or confidence
         else:
             logger.error("JSON parsing failed entirely for row %d. Degrading to raw text.", request.row_id)
-            diagnosis_text = f"[STRUCTURED PARSE FAILED - RAW OUTPUT]\n{raw_output}"
-            action_text = "Manual Review Required - AI Response was malformed."
-            evidence_data = statistics
+            fault_summary = f"[STRUCTURED PARSE FAILED - RAW OUTPUT]\n{raw_output}"
+            root_cause = "Unknown / Parse Failed"
+            trigger_mechanism = "Unknown / Parse Failed"
+            resolution_steps = ["Manual Review Required - AI Response was malformed."]
             final_confidence = "LOW"
             hallucinated = []
             val_warnings = ["LLM response was not valid JSON. Returned raw text instead."]
@@ -406,18 +378,18 @@ class FaultAnalysisOrchestrator:
             historical_match=(historical_pattern is not None),
             context_coverage_ratio=retrieval_coverage_score,
             anomaly_score=anomaly_score,
-            output_length=len(diagnosis_text) if diagnosis_text else 0,
+            output_length=len(fault_summary) if fault_summary else 0,
         )
         # Use V2 label as the public-facing confidence
         final_confidence = confidence_label
 
         # ── Step 10: Store Experience (Phase 21 — self-improving) ────────────
         try:
-            if diagnosis_text and not diagnosis_text.startswith("["):
+            if fault_summary and not fault_summary.startswith("["):
                 exp_idx = _get_fault_experience(get_container().db_client)
                 exp_idx.store_experience(
                     fault_code=fault_code,
-                    explanation_text=diagnosis_text,
+                    explanation_text=fault_summary,
                     confidence=confidence_numeric,
                     machine_id=device,
                     project_id=request.project_id,
@@ -439,9 +411,10 @@ class FaultAnalysisOrchestrator:
             user_question=request.question,
             confidence=final_confidence,
             statistics=statistics,
-            evidence=evidence_data,
-            diagnosis=diagnosis_text,
-            primary_action=action_text,
+            fault_summary=fault_summary,
+            root_cause=root_cause,
+            trigger_mechanism=trigger_mechanism,
+            resolution_steps=resolution_steps,
             docs_used=len(rag_docs),
             sources=rag_docs,
             hallucinated_tags_removed=hallucinated,

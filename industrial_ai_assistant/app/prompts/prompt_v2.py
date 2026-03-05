@@ -53,11 +53,10 @@ _ROLES = {
 # ── JSON output schemas per intent ────────────────────────────────────────────
 
 _FAULT_SCHEMA = """{
-  "summary": "<Root cause explanation>",
-  "root_causes": ["<Cause 1>", "<Cause 2>"],
-  "recommended_actions": ["<Action 1>", "<Action 2>"],
-  "supporting_evidence": ["<Evidence from data/docs>"],
-  "limitations": ["<What could not be determined>"],
+  "fault_summary": "<Summary of fault>",
+  "root_cause": "<Cause of Fault>",
+  "trigger_mechanism": "<Why fault triggered>",
+  "resolution_steps": ["<Step 1>", "<Step 2>"],
   "confidence": "<LOW | MEDIUM | HIGH>"
 }"""
 

@@ -21,9 +21,10 @@ class StructuredLLMOutput(BaseModel):
     Schema the LLM must return (strict JSON).
     Backend parses, validates, and rejects/retries if malformed.
     """
-    diagnosis: str
-    metrics: Dict[str, Any]
-    primary_action: str
+    fault_summary: str
+    root_cause: str
+    trigger_mechanism: str
+    resolution_steps: List[str]
     confidence: str
 
 
@@ -52,9 +53,10 @@ class FaultAnalysisV2Response(BaseModel):
     statistics: Dict[str, Any]
 
     # New Minimal UI Schema mapped from LLM + Stats
-    diagnosis: str
-    evidence: Dict[str, Any]
-    primary_action: str
+    fault_summary: str
+    root_cause: str
+    trigger_mechanism: str
+    resolution_steps: List[str]
     confidence: str
 
     # RAG sources
@@ -76,3 +78,20 @@ class FaultAnalysisRequest(BaseModel):
     row_id: int
     project_id: str = "default"
     question: Optional[str] = None        # If None → default analysis
+
+class QuickStatsResponse(BaseModel):
+    """Instant deterministic statistical response for UI dual-engine view."""
+    occurrences_last_hour: Optional[int] = 0
+    occurrences_last_24h: Optional[int] = 0
+    top_cooccurring_fault: Optional[str] = None
+    cooccurrence_count: Optional[int] = 0
+    burst_detected: Optional[bool] = False
+    burst_description: Optional[str] = ""
+    burst_count: Optional[int] = 0
+    confidence: Optional[str] = "MEDIUM"
+    rolling_avg_5m: Optional[float] = None
+    rolling_avg_1h: Optional[float] = None
+    delta_last_30m: Optional[float] = None
+    anomaly_score: Optional[float] = None
+    trend: Optional[str] = "STABLE"
+    integrity_passed: Optional[bool] = True
