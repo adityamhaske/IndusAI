@@ -56,7 +56,8 @@ def compute_confidence_v2(
 
     # ── Factor 4: Anomaly signal strength ────────────────────────────────────
     # Higher anomaly score = more data to reason about = higher confidence
-    anomaly_factor = min(anomaly_score / 3.0, 1.0) if anomaly_score > 0 else 0.3
+    _anomaly = anomaly_score if anomaly_score is not None else 0.0
+    anomaly_factor = min(_anomaly / 3.0, 1.0) if _anomaly > 0 else 0.3
 
     # ── Factor 5: Output consistency (length as proxy) ───────────────────────
     if output_length >= expected_min_length:

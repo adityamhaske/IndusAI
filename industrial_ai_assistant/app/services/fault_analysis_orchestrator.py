@@ -285,7 +285,7 @@ class FaultAnalysisOrchestrator:
             f"Co-occurring fault: {co_fault} ({co_count} times)\n"
             f"Burst detected: {burst} ({burst_desc})\n"
             f"Trend: {trend}\n"
-            f"Anomaly score: {f'{anomaly_score:.2f}' if anomaly_score is not None else 'N/A'}\n"
+            f"Anomaly score: {anomaly_score or 0.0:.2f}\n"
             f"Integrity: {'PASSED' if integrity_passed else 'FAILED'}"
         )
 

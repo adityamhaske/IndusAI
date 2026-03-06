@@ -69,7 +69,15 @@ class OpenAIProvider(AIProvider):
                 headers=headers,
                 timeout=httpx.Timeout(None)
             ) as response:
-                response.raise_for_status()
+                # Check status code BEFORE iterating — do NOT call raise_for_status()
+                # on a streaming response, as httpx will try to read the body.
+                if response.status_code != 200:
+                    response.read()  # Read error body
+                    error_text = response.text[:200] if response.text else "Unknown error"
+                    return self._build_error_response(
+                        f"OpenAI HTTP error: {response.status_code} - {error_text}",
+                        "CONNECTION", start_time
+                    )
                 
                 raw_text = ""
                 prompt_tokens = 0
@@ -92,7 +100,7 @@ class OpenAIProvider(AIProvider):
                                 if "content" in delta and delta["content"]:
                                     raw_text += delta["content"]
                                     first_token_received = True
-                                    last_token_timestamp = current_time
+                                    last_token_timestamp = time.perf_counter()
                             
                             if "usage" in chunk and chunk["usage"]:
                                 prompt_tokens = chunk["usage"].get("prompt_tokens", 0)
