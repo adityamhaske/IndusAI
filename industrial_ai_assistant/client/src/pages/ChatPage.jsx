@@ -138,7 +138,9 @@ const InputBar = ({ onSend, disabled }) => {
 // ── ChatPage ───────────────────────────────────────────────────────────────────
 const ChatPage = () => {
     // All state lives in the global Zustand store — survives page navigation
-    const chatHistory = useAppStore(s => s.chatHistory);
+    const allChatHistory = useAppStore(s => s.chatHistory);
+    const activeProjectId = useAppStore(s => s.activeProjectId);
+    const chatHistory = allChatHistory.filter(m => !m.projectId || m.projectId === activeProjectId);
     const appendUserMessage = useAppStore(s => s.appendUserMessage);
     const appendAssistantMessage = useAppStore(s => s.appendAssistantMessage);
     const knowledgeStatus = useAppStore(s => s.knowledgeStatus);
@@ -150,14 +152,12 @@ const ChatPage = () => {
     const [isLoading, setIsLoading] = React.useState(false);
     const bottomRef = useRef(null);
 
-    // Fetch project status once on mount (not on every render)
+    // Fetch project status on mount AND when activeProjectId changes
     useEffect(() => {
-        if (!knowledgeStatus) {
-            getProjectStatus('default')
-                .then(setKnowledgeStatus)
-                .catch(() => { });
-        }
-    }, []); // intentionally empty — only run once
+        getProjectStatus(activeProjectId || 'default')
+            .then(setKnowledgeStatus)
+            .catch(() => { });
+    }, [activeProjectId, setKnowledgeStatus]);
 
     // Auto-scroll
     useEffect(() => {
@@ -170,7 +170,7 @@ const ChatPage = () => {
         try {
             const data = await queryKnowledge({
                 question,
-                project_id: 'default',
+                project_id: activeProjectId || 'default',
                 selected_files: selectedFiles,
                 selected_folders: selectedFolders,
                 scope_mode: scopeMode

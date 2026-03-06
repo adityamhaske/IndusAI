@@ -179,3 +179,51 @@ async def rebuild_full(
         container.project_service.update_index_status(project_id, "OUTDATED")
         logger.exception("Full rebuild failed for %s", project_id)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── DELETE /api/projects/{id} ─────────────────────────────────────────────────
+
+@router.delete("/projects/{project_id}", tags=["Projects"])
+def delete_project(project_id: str, container: Container = Depends(get_container)):
+    """
+    Permanently delete a project and all associated data:
+    - SQLite records (project, files, telemetry datasets)
+    - Qdrant vectors for this project
+    - Fault dataset cache
+    - Context manager state
+    """
+    if project_id == "default":
+        raise HTTPException(status_code=400, detail="Cannot delete the default project.")
+
+    # 1. Delete vectors from Qdrant
+    try:
+        from app.indexes.structured_index import clear_structured_index
+        from app.indexes.semantic_index import get_semantic_index
+        clear_structured_index(project_id)
+        get_semantic_index().delete_project(project_id)
+    except Exception as e:
+        logger.warning("Could not clear vectors for project %s: %s", project_id, e)
+
+    # 2. Clear fault dataset cache
+    try:
+        from app.services.fault_service import get_fault_service
+        get_fault_service().reset(project_id)
+    except Exception as e:
+        logger.warning("Could not clear fault cache for project %s: %s", project_id, e)
+
+    # 3. Clear context manager state
+    try:
+        from app.services.project_context_manager import get_project_context_manager
+        ctx = get_project_context_manager()
+        ctx.unload(project_id)
+    except Exception as e:
+        logger.warning("Could not unload context for project %s: %s", project_id, e)
+
+    # 4. Delete from SQLite (project + files + telemetry)
+    deleted = container.project_service.delete_project(project_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+
+    logger.info("Project %s fully deleted.", project_id)
+    return {"status": "deleted", "project_id": project_id}
+

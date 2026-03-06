@@ -20,6 +20,12 @@ const systemApi = {
      * Updates AI gateway telemetry SLAs, timeouts, and API keys securely.
      */
     updateConfig: (payload) => axios.post(`${BASE}/config`, payload).then(r => r.data),
+
+    /**
+     * POST /api/system/reconnect
+     * Reinitializes all AI providers and connections. Returns fresh health status.
+     */
+    reconnect: () => axios.post(`${BASE}/reconnect`).then(r => r.data),
 };
 
 export default systemApi;

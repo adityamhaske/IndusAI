@@ -1,4 +1,5 @@
 import React from 'react';
+import useAppStore from '../store/useAppStore';
 
 export const LogsPage = () => (
     <div className="p-8">
@@ -18,17 +19,19 @@ export const HistoryPage = () => {
     const [resuming, setResuming] = useState(null);
     const [expanded, setExpanded] = useState(null);
     const [detail, setDetail] = useState(null);
+    const activeProjectId = useAppStore(s => s.activeProjectId);
 
     const fetchSessions = useCallback(async (type, sort) => {
         setLoading(true);
         try {
             const params = new URLSearchParams({ sort_by: sort, limit: 200 });
             if (type && type !== 'all' && type !== 'system') params.set('session_type', type);
+            if (activeProjectId) params.set('project_id', activeProjectId);
             const r = await fetch(`/api/history?${params}`);
             const data = await r.json();
             setSessions(Array.isArray(data) ? data : []);
         } catch { setSessions([]); } finally { setLoading(false); }
-    }, []);
+    }, [activeProjectId]);
 
     const fetchPlc = useCallback(async (sort) => {
         try {
@@ -41,7 +44,7 @@ export const HistoryPage = () => {
     useEffect(() => {
         if (tab === 'plc') { fetchPlc(sortBy); }
         else { fetchSessions(tab === 'chat' ? 'chat' : tab === 'all' ? null : null, sortBy); }
-    }, [tab, sortBy, fetchSessions, fetchPlc]);
+    }, [tab, sortBy, fetchSessions, fetchPlc, activeProjectId]);
 
     const handleDelete = async (id, e) => {
         e.stopPropagation();
@@ -451,7 +454,9 @@ const FolderTreeNode = ({ node, level = 0 }) => {
 
 // ── Project Page ──────────────────────────────────────────────────────────────
 export const ProjectPage = () => {
-    const [projectId] = useState('default');
+    const projectId = useAppStore(s => s.activeProjectId) || 'default';
+    const deleteProjectAction = useAppStore(s => s.deleteProject);
+    const resetProjectData = useAppStore(s => s.resetProjectData);
     const [status, setStatus] = useState(null);
     const [filesTree, setFilesTree] = useState([]);
     const [ingesting, setIngesting] = useState(false);
@@ -466,13 +471,19 @@ export const ProjectPage = () => {
     const pollRef = useRef(null);
     const fileInputRef = useRef(null);
 
+    const setKnowledgeStatus = useAppStore(s => s.setKnowledgeStatus);
+
     const fetchStatusAndFiles = useCallback(async () => {
         try {
             const [s, f] = await Promise.all([
                 getProjectStatus(projectId).catch(() => null),
                 getProjectFiles(projectId).catch(() => [])
             ]);
-            if (s) setStatus(s);
+            if (s) {
+                setStatus(s);
+                // Push to global store so ChatPage & Header reflect updates immediately
+                setKnowledgeStatus(s);
+            }
             if (f) setFilesTree(f);
 
             const done = s && ['READY', 'FAILED', 'UNLOADED'].includes(s.index_state);
@@ -482,7 +493,7 @@ export const ProjectPage = () => {
                 setIngesting(false);
             }
         } catch { }
-    }, [projectId]);
+    }, [projectId, setKnowledgeStatus]);
 
     const startPoll = () => {
         if (pollRef.current) clearInterval(pollRef.current);
@@ -553,14 +564,46 @@ export const ProjectPage = () => {
         }
     };
 
-    const handleReset = async () => {
-        if (!window.confirm('Reset project index? This cannot be undone.')) return;
+    const handleRebuildIndex = async () => {
+        if (!window.confirm('Rebuild the entire knowledge index from scratch? This will re-process all files.')) return;
+        setError(''); setIngesting(true); startPoll();
         try {
-            await resetProject(projectId);
-            setSelectedFiles(null); setFolderName('');
-            setFilesTree([]);
+            await projectApi.rebuildFull(projectId);
             await fetchStatusAndFiles();
-        } catch (e) { setError(e.message); }
+        } catch (e) {
+            setError(e.message || 'Rebuild failed');
+            setIngesting(false);
+            if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+        }
+    };
+
+    const handleReindexDelta = async () => {
+        setError(''); setIngesting(true); startPoll();
+        try {
+            await projectApi.reindexDelta(projectId);
+            await fetchStatusAndFiles();
+        } catch (e) {
+            setError(e.message || 'Reindex failed');
+            setIngesting(false);
+            if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+        }
+    };
+
+    const handleClearFaults = async () => {
+        if (!window.confirm('Clear all fault data and analysis results for this project?')) return;
+        try {
+            await fetch(`/api/fault/reset?project_id=${projectId}`, { method: 'DELETE' });
+            resetProjectData();
+        } catch (e) { setError(e.message || 'Failed to clear fault data'); }
+    };
+
+    const handleDeleteProject = async () => {
+        if (projectId === 'default') { alert('Cannot delete the default project.'); return; }
+        if (!window.confirm(`Permanently delete project "${projectId}" and ALL its data? This cannot be undone.`)) return;
+        try {
+            await deleteProjectAction(projectId);
+            window.location.href = '/';
+        } catch (e) { setError(e.message || 'Failed to delete project'); }
     };
 
     return (
@@ -694,7 +737,7 @@ export const ProjectPage = () => {
                                     className="flex-1 flex items-center justify-center gap-2 px-5 py-2.5 bg-industrial-900 text-white rounded-xl text-sm font-bold hover:bg-industrial-800 disabled:opacity-50 transition-colors shadow-sm"
                                 >
                                     {ingesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-                                    {ingesting ? 'Indexing documents...' : status?.project_loaded ? 'Reindex Delta' : 'Upload & Index'}
+                                    {ingesting ? 'Indexing documents...' : 'Upload & Index'}
                                 </button>
                             ) : (
                                 <>
@@ -715,11 +758,40 @@ export const ProjectPage = () => {
                             )}
                             {status?.project_loaded && (
                                 <button
-                                    onClick={handleReset} disabled={ingesting}
-                                    title="Wipe Index"
-                                    className="p-2.5 border border-red-200 text-red-600 rounded-xl hover:bg-red-50 hover:text-red-700 disabled:opacity-40 transition-colors"
+                                    onClick={handleReindexDelta} disabled={ingesting}
+                                    title="Re-index changed files only (incremental)"
+                                    className="flex items-center gap-1.5 px-4 py-2.5 bg-industrial-900 text-white rounded-xl hover:bg-industrial-800 disabled:opacity-40 transition-colors text-xs font-semibold"
                                 >
-                                    <Trash2 className="w-4 h-4" />
+                                    {ingesting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                                    Reindex Delta
+                                </button>
+                            )}
+                            {status?.project_loaded && (
+                                <button
+                                    onClick={handleRebuildIndex} disabled={ingesting}
+                                    title="Full rebuild — wipe all embeddings and reindex from scratch"
+                                    className="flex items-center gap-1.5 px-3 py-2.5 border border-blue-200 text-blue-600 rounded-xl hover:bg-blue-50 disabled:opacity-40 transition-colors text-xs font-semibold"
+                                >
+                                    <RefreshCw className="w-3.5 h-3.5" />
+                                    Rebuild
+                                </button>
+                            )}
+                            <button
+                                onClick={handleClearFaults} disabled={ingesting}
+                                title="Clear Fault Data & Analysis"
+                                className="flex items-center gap-1.5 px-3 py-2.5 border border-yellow-200 text-yellow-700 rounded-xl hover:bg-yellow-50 disabled:opacity-40 transition-colors text-xs font-semibold"
+                            >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                Clear Faults
+                            </button>
+                            {projectId !== 'default' && (
+                                <button
+                                    onClick={handleDeleteProject} disabled={ingesting}
+                                    title="Delete Entire Project"
+                                    className="flex items-center gap-1.5 px-3 py-2.5 border border-red-300 text-red-600 rounded-xl hover:bg-red-50 disabled:opacity-40 transition-colors text-xs font-semibold"
+                                >
+                                    <XCircle className="w-3.5 h-3.5" />
+                                    Delete Project
                                 </button>
                             )}
                         </div>

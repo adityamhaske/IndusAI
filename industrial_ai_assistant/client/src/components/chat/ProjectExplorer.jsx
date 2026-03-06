@@ -88,15 +88,17 @@ export default function ProjectExplorer() {
     const selectedFolders = useAppStore(s => s.selectedFolders);
     const setSelectedFiles = useAppStore(s => s.setSelectedFiles);
     const setSelectedFolders = useAppStore(s => s.setSelectedFolders);
+    const activeProjectId = useAppStore(s => s.activeProjectId);
 
     useEffect(() => {
-        getProjectFiles('default')
+        setLoading(true);
+        getProjectFiles(activeProjectId || 'default')
             .then(data => {
                 setTree(data);
                 setLoading(false);
             })
-            .catch(() => setLoading(false));
-    }, []);
+            .catch(() => { setTree([]); setLoading(false); });
+    }, [activeProjectId]);
 
     const toggleFile = (path) => {
         if (selectedFiles.includes(path)) {

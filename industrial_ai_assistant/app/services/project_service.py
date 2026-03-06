@@ -73,6 +73,26 @@ class ProjectService:
         """Backward-compatible create. Delegates to upsert."""
         return self.upsert_project(project_id, name)
 
+    def delete_project(self, project_id: str) -> bool:
+        """Delete a project and all associated files and telemetry datasets."""
+        db = self.db_client.get_session()
+        try:
+            obj = db.query(Project).filter_by(id=project_id).first()
+            if not obj:
+                return False
+            # Delete associated records first
+            db.query(ProjectFile).filter_by(project_id=project_id).delete()
+            db.query(TelemetryDataset).filter_by(project_id=project_id).delete()
+            db.delete(obj)
+            db.commit()
+            logger.info("Deleted project %s and all associated data", project_id)
+            return True
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
     def update_index_status(
         self,
         project_id: str,

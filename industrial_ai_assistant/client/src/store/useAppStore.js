@@ -1,21 +1,40 @@
 /**
  * useAppStore.js — Global Zustand store for IndusAI.
  *
+ * Project-scoped: each project has its own chat, faults, and analysis state.
  * Persists to localStorage on every write.
  * Hydrates on app load automatically.
- * Clears only when resetAll() is explicitly called.
  */
 import { create } from 'zustand';
 import { projectApi } from '../services/projectApi';
 import { persist, createJSONStorage } from 'zustand/middleware';
 
-const STORE_KEY = 'indusai_app_state_v1';
+const STORE_KEY = 'indusai_app_state_v2';
 
 const useAppStore = create(
     persist(
         (set, get) => ({
+            // ── Active Project ───────────────────────────────────────────────
+            activeProjectId: localStorage.getItem('activeProjectId') || 'default',
+
+            switchProject(pid) {
+                localStorage.setItem('activeProjectId', pid);
+                set({
+                    activeProjectId: pid,
+                    // Clear transient state on switch — project-specific data reloads from backend
+                    chatHistory: [],
+                    faultDataset: null,
+                    analysisResults: {},
+                    selectedFaultId: null,
+                    selectedFiles: [],
+                    selectedFolders: [],
+                    scopeMode: 'GLOBAL',
+                    knowledgeStatus: null,
+                });
+            },
+
             // ── Chat ─────────────────────────────────────────────────────────
-            chatHistory: [],   // [{ id, role, content, structuredResponse, timestamp }]
+            chatHistory: [],   // [{ id, role, content, structuredResponse, timestamp, projectId }]
 
             appendUserMessage(question) {
                 const msg = {
@@ -23,6 +42,7 @@ const useAppStore = create(
                     role: 'user',
                     content: question,
                     timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                    projectId: get().activeProjectId,
                 };
                 set(s => ({ chatHistory: [...s.chatHistory, msg] }));
                 return msg.id;
@@ -32,38 +52,41 @@ const useAppStore = create(
                 const msg = {
                     id: Date.now() + 1,
                     role: 'assistant',
-                    // plain text fallback for errors / strings
                     content: typeof structuredResponse === 'string' ? structuredResponse : null,
                     structuredResponse: typeof structuredResponse === 'object' ? structuredResponse : null,
                     timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                    projectId: get().activeProjectId,
                 };
                 set(s => ({ chatHistory: [...s.chatHistory, msg] }));
             },
 
             clearChat() {
-                set({ chatHistory: [] });
+                // Only clears chat for the active project
+                const pid = get().activeProjectId;
+                set(s => ({ chatHistory: s.chatHistory.filter(m => m.projectId && m.projectId !== pid) }));
             },
 
             resetChatSession() {
-                set({
-                    chatHistory: [],
+                const pid = get().activeProjectId;
+                set(s => ({
+                    chatHistory: s.chatHistory.filter(m => m.projectId && m.projectId !== pid),
                     selectedFiles: [],
                     selectedFolders: [],
                     scopeMode: 'GLOBAL',
-                });
+                }));
             },
 
             // ── Project knowledge status ──────────────────────────────────
-            knowledgeStatus: null,   // ProjectStatus from backend
+            knowledgeStatus: null,
             setKnowledgeStatus(s) { set({ knowledgeStatus: s }); },
 
             // ── Fault dataset ─────────────────────────────────────────────
-            faultDataset: null,      // { file, uploadedAt, summary, rows }
+            faultDataset: null,
             setFaultDataset(d) { set({ faultDataset: d }); },
             clearFaultDataset() { set({ faultDataset: null }); },
 
             // ── Analysis results ──────────────────────────────────────────
-            analysisResults: {},     // { [rowId]: AnalysisResponse }
+            analysisResults: {},
             setAnalysisResult(rowId, result) {
                 set(s => ({ analysisResults: { ...s.analysisResults, [rowId]: result } }));
             },
@@ -76,18 +99,36 @@ const useAppStore = create(
             // ── Scope Context ─────────────────────────────────────────────
             selectedFiles: [],
             selectedFolders: [],
-            scopeMode: 'GLOBAL', // GLOBAL | PREFER | STRICT
+            scopeMode: 'GLOBAL',
             setSelectedFiles: (files) => set({ selectedFiles: files }),
             setSelectedFolders: (folders) => set({ selectedFolders: folders }),
             setScopeMode: (mode) => set({ scopeMode: mode }),
 
-            // ── Global reset ──────────────────────────────────────────────
+            // ── Project-scoped resets ─────────────────────────────────────
+            resetProjectData() {
+                // Clear fault data + analysis for the active project
+                set({
+                    faultDataset: null,
+                    analysisResults: {},
+                    selectedFaultId: null,
+                });
+            },
+
+            async deleteProject(projectId) {
+                try {
+                    await projectApi.deleteProject(projectId);
+                } catch { /* ignore */ }
+                // If we deleted the active project, switch to default
+                if (get().activeProjectId === projectId) {
+                    get().switchProject('default');
+                }
+            },
+
+            // ── Legacy global reset (kept for backward compatibility) ─────
             async resetAll() {
-                // Reset backend project index
                 try {
                     await projectApi.resetProject('default');
                 } catch { /* ignore */ }
-                // Clear frontend state
                 set({
                     chatHistory: [],
                     knowledgeStatus: null,
@@ -97,15 +138,17 @@ const useAppStore = create(
                     selectedFiles: [],
                     selectedFolders: [],
                     scopeMode: 'GLOBAL',
+                    activeProjectId: 'default',
                 });
+                localStorage.setItem('activeProjectId', 'default');
             },
         }),
         {
             name: STORE_KEY,
             storage: createJSONStorage(() => localStorage),
-            // Persist everything except transient UI state
             partialize: (state) => ({
-                chatHistory: state.chatHistory.slice(-100), // cap at 100 messages
+                activeProjectId: state.activeProjectId,
+                chatHistory: state.chatHistory.slice(-200), // cap at 200 messages across projects
                 knowledgeStatus: state.knowledgeStatus,
                 faultDataset: state.faultDataset,
                 analysisResults: state.analysisResults,
