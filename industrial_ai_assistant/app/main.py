@@ -17,7 +17,12 @@ app = FastAPI(title="Industrial AI Assistant", debug=settings.DEBUG)
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://indus-ai-cloud-101.web.app",
+        "https://indus-ai-cloud-101.firebaseapp.com",
+        "http://localhost:5173",
+        "http://localhost:8000"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

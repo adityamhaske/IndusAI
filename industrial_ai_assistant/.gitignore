@@ -26,6 +26,7 @@ ENV/
 .env
 .env.local
 .env.*.local
+*firebase-adminsdk*.json
 
 # ── Data & Model Artifacts ───────────────────────────────────────────────────
 data/
@@ -39,7 +40,7 @@ data/
 # ── Vector Store ─────────────────────────────────────────────────────────────
 qdrant_storage/
 *.qdrant/
-storage/
+/storage/
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
 *.log

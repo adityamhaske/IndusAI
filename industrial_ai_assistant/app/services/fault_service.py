@@ -79,8 +79,39 @@ class FaultService:
         self._store: Dict[str, FaultDataset] = {}
         self._lock = threading.RLock()
         self._initialized = True
+        try:
+            from app.core.firebase import get_firestore_client
+            self.db = get_firestore_client()
+            self.collection = self.db.collection("fault_sessions")
+            self._use_firestore = True
+        except Exception as e:
+            logger.warning(f"Firestore unavailable: {e}")
+            self._use_firestore = False
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def store_session(self, session_id: str, stats: Dict[str, Any]):
+        """Store computed fault stats for a session in Firestore."""
+        if self._use_firestore:
+            from firebase_admin import firestore
+            self.collection.document(session_id).set({
+                "stats": stats,
+                "created_at": firestore.SERVER_TIMESTAMP
+            })
+
+    def get_session(self, session_id: str) -> Dict[str, Any]:
+        """Retrieve fault stats for a session from Firestore."""
+        if not self._use_firestore:
+            raise ValueError("Firestore not configured")
+        doc = self.collection.document(session_id).get()
+        if not doc.exists:
+            raise ValueError(f"Session {session_id} not found")
+        return doc.to_dict().get("stats", {})
+
+    def delete_session(self, session_id: str):
+        """Clean up session data from Firestore."""
+        if self._use_firestore:
+            self.collection.document(session_id).delete()
 
     def _require_dataset(self, project_id: str) -> FaultDataset:
         ds = self._store.get(project_id)

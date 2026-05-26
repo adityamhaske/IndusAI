@@ -1,3 +1,4 @@
+import os
 from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -10,12 +11,12 @@ class Settings(BaseSettings):
 
     # Paths
     DATA_DIR: str = "./data"
-    DB_PATH: str = "./data/app.db"
+    DB_PATH: str = os.environ.get("DB_PATH", "/tmp/app.db")
 
     # Components
-    LLM_PROVIDER: Literal["ollama", "mock"] = "ollama"
-    EMBEDDING_PROVIDER: Literal["sentence_transformers", "mock"] = "sentence_transformers"
-    VECTOR_STORE_TYPE: Literal["qdrant", "in_memory"] = "qdrant"
+    LLM_PROVIDER: Literal["gemini", "ollama", "mock"] = "gemini"
+    EMBEDDING_PROVIDER: Literal["gemini", "sentence_transformers", "mock"] = "gemini"
+    VECTOR_STORE_TYPE: Literal["cloud", "qdrant", "in_memory"] = "cloud"
     RETRIEVER_TYPE: Literal["hybrid", "keyword"] = "hybrid"
 
     # Component Configs
@@ -25,7 +26,11 @@ class Settings(BaseSettings):
     QDRANT_HOST: str = "localhost"
     QDRANT_PORT: int = 6333
     QDRANT_COLLECTION: str = "industrial_docs"
+    QDRANT_URL: str = ""
+    QDRANT_API_KEY: str = ""
     
+    FIREBASE_STORAGE_BUCKET: str = ""
+
     EMBEDDING_MODEL_NAME: str = "all-MiniLM-L6-v2"
 
     # API Keys (Injected via Environment, never logged)

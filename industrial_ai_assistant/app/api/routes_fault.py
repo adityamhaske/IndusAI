@@ -62,9 +62,14 @@ async def upload_fault_csv(
     project_id: str = Form(default="default"),
 ):
     """
-    Upload a PLC fault log CSV.
-    Validates file size, normalizes schema, caches stats, returns preview.
+    Upload a PLC fault log CSV to Firebase Storage and process.
     """
+    import uuid
+    from app.core.firebase import get_storage_bucket
+
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only CSV files accepted")
+
     # File size check (before reading all bytes)
     raw_bytes = await file.read()
     size_mb = len(raw_bytes) / (1024 ** 2)
@@ -74,6 +79,19 @@ async def upload_fault_csv(
             FaultTooLargeError(f"File size {size_mb:.1f} MB exceeds limit of {MAX_FILE_SIZE_MB} MB."),
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
         )
+
+    # Generate unique filename
+    file_id = str(uuid.uuid4())
+    blob_path = f"fault-logs/{file_id}/{file.filename}"
+    
+    # Upload to Firebase Storage
+    try:
+        bucket = get_storage_bucket()
+        blob = bucket.blob(blob_path)
+        blob.upload_from_string(raw_bytes, content_type="text/csv")
+        logger.info(f"Uploaded {file.filename} to Firebase Storage at {blob_path}")
+    except Exception as e:
+        logger.warning(f"Failed to upload to Firebase Storage: {e}")
 
     try:
         df_raw = pd.read_csv(io.BytesIO(raw_bytes))

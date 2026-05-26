@@ -69,7 +69,7 @@ async def _get_lock(project_id: str) -> asyncio.Lock:
 class ProjectIngestionPipeline:
     """Orchestrates full project ingestion with concurrency guard."""
 
-    async def ingest(self, folder_path: str, project_id: str) -> IngestionResult:
+    async def ingest(self, folder_path: str, project_id: str, progress_callback=None) -> IngestionResult:
         """
         Entry point. Returns IngestionResult.
         Raises IngestionLockError if already running for this project.
@@ -79,9 +79,9 @@ class ProjectIngestionPipeline:
             raise IngestionLockError(project_id)
 
         async with lock:
-            return await self._run_ingestion(folder_path, project_id)
+            return await self._run_ingestion(folder_path, project_id, progress_callback)
 
-    async def _run_ingestion(self, folder_path: str, project_id: str) -> IngestionResult:
+    async def _run_ingestion(self, folder_path: str, project_id: str, progress_callback=None) -> IngestionResult:
         ctx = get_project_context_manager()
         t0 = time.perf_counter()
 
@@ -141,7 +141,13 @@ class ProjectIngestionPipeline:
                 sem.remove_file(project_id, str(folder / rel_path))
 
         # 2. Process active files
+        total_files = len(current_files_map)
+        processed_count = 0
         for rel_path, file_path in current_files_map.items():
+            processed_count += 1
+            if progress_callback:
+                progress_callback(processed_count, total_files)
+                
             ext = file_path.suffix.lower()
             try:
                 mtime = file_path.stat().st_mtime

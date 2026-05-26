@@ -6,20 +6,30 @@ from app.core.schemas import DocumentChunk, ChunkMetadata
 from app.core.exceptions import VectorStoreError
 
 class QdrantStore(VectorStoreInterface):
-    def __init__(self, host: str, port: int, collection_name: str, vector_size: int = 384):
-        self.client = QdrantClient(host=host, port=port)
+    def __init__(self, host: str, port: int, collection_name: str, vector_size: int = 768, url: str = "", api_key: str = ""):
+        if url and api_key:
+            self.client = QdrantClient(url=url, api_key=api_key)
+        else:
+            self.client = QdrantClient(host=host, port=port)
         self.collection_name = collection_name
         self.vector_size = vector_size
         self._ensure_collection()
 
     def _ensure_collection(self):
+        from qdrant_client.http.exceptions import UnexpectedResponse
         try:
             self.client.get_collection(self.collection_name)
         except Exception:
-            self.client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=models.VectorParams(size=self.vector_size, distance=models.Distance.COSINE)
-            )
+            try:
+                self.client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=models.VectorParams(size=self.vector_size, distance=models.Distance.COSINE)
+                )
+            except UnexpectedResponse as e:
+                if getattr(e, "status_code", None) == 409 or "already exists" in str(e):
+                    pass # Collection already exists
+                else:
+                    raise
 
     def add_documents(self, documents: List[DocumentChunk]) -> bool:
         try:

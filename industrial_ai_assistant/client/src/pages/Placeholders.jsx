@@ -521,23 +521,56 @@ export const ProjectPage = () => {
             setError('Select a folder first.'); return;
         }
         setError(''); setPathDiag(null);
-        setIngesting(true); setUploadProgress({ sent: 0, total: selectedFiles.length, pct: 0 });
-        startPoll();
-
-        const form = new FormData();
-        form.append('project_id', projectId);
-        for (const file of selectedFiles) {
-            form.append('files', file, file.webkitRelativePath || file.name);
-        }
+        setIngesting(true); setUploadProgress({ sent: 0, total: selectedFiles.length, pct: 0, msg: "Uploading..." });
 
         try {
-            await projectApi.ingestUpload(projectId, selectedFiles);
-            await fetchStatusAndFiles();
+            const res = await projectApi.ingestUpload(projectId, selectedFiles);
+            const jobId = res.job_id;
+            
+            let elapsed = 0;
+            const pollInterval = setInterval(async () => {
+                elapsed += 2;
+                if (elapsed > 300) { // 5 minutes
+                    clearInterval(pollInterval);
+                    setIngesting(false);
+                    setError("Indexing is taking longer than expected. Check Project Info page in a few minutes or try re-uploading.");
+                    setUploadProgress(null);
+                    return;
+                }
+                
+                try {
+                    const statusRes = await projectApi.getIngestStatus(jobId);
+                    if (statusRes.status === 'unknown') {
+                        clearInterval(pollInterval);
+                        setIngesting(false);
+                        setError(statusRes.error || "Job not found. The server may have restarted. Please re-upload your files.");
+                        setUploadProgress(null);
+                        return;
+                    }
+                    if (statusRes.status === 'failed') {
+                        clearInterval(pollInterval);
+                        setIngesting(false);
+                        setError(statusRes.error || "Indexing failed.");
+                        setUploadProgress(null);
+                        return;
+                    }
+                    
+                    setUploadProgress(prev => ({ ...prev, msg: statusRes.progress || "Processing..." }));
+                    
+                    if (statusRes.status === 'complete') {
+                        clearInterval(pollInterval);
+                        await fetchStatusAndFiles();
+                        setIngesting(false);
+                        setUploadProgress(null);
+                    }
+                } catch (err) {
+                    console.error("Poll error", err);
+                }
+            }, 2000);
+            
         } catch (e) {
             setError(e.message || 'Upload failed');
             setIngesting(false);
-            if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-        } finally {
             setUploadProgress(null);
         }
     };
@@ -666,21 +699,27 @@ export const ProjectPage = () => {
                             <h3 className="text-base font-bold text-industrial-800">Add Project Source Data</h3>
                             <div className="flex rounded-lg border border-industrial-200 overflow-hidden text-xs">
                                 <button
-                                    onClick={() => { setUseUpload(true); setError(''); setPathDiag(null); }}
-                                    className={`px-3 py-1.5 font-medium transition-colors ${useUpload ? 'bg-primary-600 text-white' : 'text-industrial-500 hover:bg-industrial-50'}`}
+                                    onClick={() => { setUseUpload('folder'); setError(''); setPathDiag(null); }}
+                                    className={`px-3 py-1.5 font-medium transition-colors ${useUpload === 'folder' || useUpload === true ? 'bg-primary-600 text-white' : 'text-industrial-500 hover:bg-industrial-50'}`}
                                 >
-                                    Picker
+                                    Folder
                                 </button>
                                 <button
-                                    onClick={() => { setUseUpload(false); setError(''); setPathDiag(null); }}
-                                    className={`px-3 py-1.5 font-medium transition-colors ${!useUpload ? 'bg-primary-600 text-white' : 'text-industrial-500 hover:bg-industrial-50'}`}
+                                    onClick={() => { setUseUpload('file'); setError(''); setPathDiag(null); }}
+                                    className={`px-3 py-1.5 font-medium transition-colors ${useUpload === 'file' ? 'bg-primary-600 text-white' : 'text-industrial-500 hover:bg-industrial-50'}`}
+                                >
+                                    File
+                                </button>
+                                <button
+                                    onClick={() => { setUseUpload('path'); setError(''); setPathDiag(null); }}
+                                    className={`px-3 py-1.5 font-medium transition-colors ${useUpload === 'path' || useUpload === false ? 'bg-primary-600 text-white' : 'text-industrial-500 hover:bg-industrial-50'}`}
                                 >
                                     Path
                                 </button>
                             </div>
                         </div>
 
-                        {useUpload ? (
+                        {(useUpload === 'folder' || useUpload === true) && (
                             <div className="space-y-4">
                                 <input
                                     ref={fileInputRef}
@@ -712,7 +751,42 @@ export const ProjectPage = () => {
                                     )}
                                 </div>
                             </div>
-                        ) : (
+                        )}
+
+                        {useUpload === 'file' && (
+                            <div className="space-y-4">
+                                <input
+                                    ref={fileInputRef}
+                                    type="file"
+                                    multiple
+                                    className="hidden" onChange={onFolderPicked}
+                                    accept=".l5x,.L5X,.xlsx,.xls,.pdf,.txt,.md,.csv"
+                                />
+
+                                <div
+                                    onClick={() => !ingesting && fileInputRef.current?.click()}
+                                    className={`border-2 border-dashed rounded-xl p-6 flex flex-col items-center gap-3 cursor-pointer transition-colors ${folderName
+                                        ? 'border-primary-300 bg-primary-50'
+                                        : 'border-industrial-200 hover:border-primary-300 hover:bg-primary-50'
+                                        } ${ingesting ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''}`}
+                                >
+                                    <FileText className={`w-8 h-8 ${folderName ? 'text-primary-500' : 'text-industrial-300'}`} />
+                                    {folderName ? (
+                                        <div className="text-center">
+                                            <p className="font-bold text-primary-700 truncate max-w-xs">{folderName}</p>
+                                            <p className="text-xs text-primary-500 mt-0.5">{selectedFiles?.length} files scheduled</p>
+                                        </div>
+                                    ) : (
+                                        <div className="text-center">
+                                            <p className="font-semibold text-industrial-600">Select individual files...</p>
+                                            <p className="text-xs text-industrial-400 mt-1 max-w-xs leading-relaxed">Upload specific PDF manuals, L5X files, or spreadsheets directly.</p>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {(useUpload === 'path' || useUpload === false) && (
                             <div className="space-y-2">
                                 <label className="text-xs font-semibold text-industrial-600 uppercase">Absolute Folder Mount Path</label>
                                 <input
@@ -731,13 +805,13 @@ export const ProjectPage = () => {
                         )}
 
                         <div className="flex gap-2 items-center flex-wrap pt-2">
-                            {useUpload ? (
+                            {useUpload === 'folder' || useUpload === 'file' || useUpload === true ? (
                                 <button
                                     onClick={startUploadIngestion} disabled={ingesting || !selectedFiles}
                                     className="flex-1 flex items-center justify-center gap-2 px-5 py-2.5 bg-industrial-900 text-white rounded-xl text-sm font-bold hover:bg-industrial-800 disabled:opacity-50 transition-colors shadow-sm"
                                 >
                                     {ingesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-                                    {ingesting ? 'Indexing documents...' : 'Upload & Index'}
+                                    {ingesting ? (uploadProgress?.msg || 'Indexing documents...') : 'Upload & Index'}
                                 </button>
                             ) : (
                                 <>
@@ -752,7 +826,7 @@ export const ProjectPage = () => {
                                         className="flex-1 flex items-center justify-center gap-2 px-5 py-2.5 bg-industrial-900 text-white rounded-xl text-sm font-bold hover:bg-industrial-800 disabled:opacity-50 transition-colors shadow-sm"
                                     >
                                         {ingesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderOpen className="w-4 h-4" />}
-                                        {ingesting ? 'Indexing documents...' : 'Start Indexing'}
+                                        {ingesting ? (uploadProgress?.msg || 'Indexing documents...') : 'Start Indexing'}
                                     </button>
                                 </>
                             )}
@@ -835,145 +909,31 @@ export const ProjectPage = () => {
 
 // ── Settings Page ──────────────────────────────────────────────────────────────
 export const SettingsPage = () => {
-    const [config, setConfig] = useState(null);
-    const [loading, setLoading] = useState(true);
-    const [saving, setSaving] = useState(false);
-    const [error, setError] = useState(null);
-    const [success, setSuccess] = useState(false);
-
-    // Form state
-    const [primary, setPrimary] = useState('local_ollama');
-    const [secondary, setSecondary] = useState('none');
-    const [cfgTimeout, setCfgTimeout] = useState(8000);
-    const [speculative, setSpeculative] = useState(true);
-    const [openaiKey, setOpenaiKey] = useState('');
-    const [geminiKey, setGeminiKey] = useState('');
-    const [validateState, setValidateState] = useState({ openai: null, gemini: null }); // null | 'validating' | 'VALID' | 'INVALID'
-    const [validateDetail, setValidateDetail] = useState({ openai: null, gemini: null });
-    const [connectionStatus, setConnectionStatus] = useState(null); // null | {status, provider, latency_ms, model, error}
+    const [connectionStatus, setConnectionStatus] = useState(null);
     const [diagnostics, setDiagnostics] = useState(null);
     const [showDiag, setShowDiag] = useState(false);
+    const [testing, setTesting] = useState(false);
 
-    useEffect(() => {
-        let isMounted = true;
-        systemApi.getConfig().then(data => {
-            if (!isMounted) return;
-            setConfig(data);
-            setPrimary(data.primary_provider || 'local_ollama');
-            setSecondary(data.secondary_provider || 'none');
-            setCfgTimeout(data.timeout_ms || 8000);
-            setSpeculative(data.speculative_fallback ?? true);
-            setOpenaiKey(data.providers?.openai?.enabled ? '********' : '');
-            setGeminiKey(data.providers?.gemini?.enabled ? '********' : '');
-            setLoading(false);
-        }).catch(e => {
-            if (!isMounted) return;
-            setError('Failed to load configuration.');
-            setLoading(false);
-        });
-        return () => { isMounted = false; };
-    }, []);
-
-    const handleSave = async () => {
-        setError(null);
-        setSuccess(false);
-        setSaving(true);
-        try {
-            const payload = {
-                primary_provider: primary,
-                secondary_provider: secondary,
-                timeout_ms: parseInt(cfgTimeout, 10),
-                max_tokens: 2000,
-                speculative_fallback: speculative,
-                openai_api_key: openaiKey === '********' ? null : openaiKey,
-                gemini_api_key: geminiKey === '********' ? null : geminiKey,
-            };
-            await systemApi.updateConfig(payload);
-            setSuccess(true);
-            setTimeout(() => setSuccess(false), 3000);
-        } catch (e) {
-            setError(e.message || 'Failed to save configuration');
-        } finally {
-            setSaving(false);
-        }
-    };
-
-    const handleValidateKey = async (provider) => {
-        const key = provider === 'openai' ? openaiKey : geminiKey;
-        if (!key || key === '********') return;
-        setValidateState(prev => ({ ...prev, [provider]: 'validating' }));
-        setValidateDetail(prev => ({ ...prev, [provider]: null }));
-        try {
-            const res = await fetch('/api/ai/validate-provider', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ provider, api_key: key }),
-            });
-            const data = await res.json();
-            setValidateState(prev => ({ ...prev, [provider]: data.success ? 'VALID' : 'INVALID' }));
-            setValidateDetail(prev => ({
-                ...prev,
-                [provider]: data.success
-                    ? `Connected · ${data.model ?? 'unknown'} · ${data.latency_ms}ms`
-                    : (data.details || data.error || 'Invalid Key'),
-            }));
-        } catch (e) {
-            setValidateState(prev => ({ ...prev, [provider]: 'INVALID' }));
-            setValidateDetail(prev => ({ ...prev, [provider]: 'Connection failed' }));
-        }
-    };
-
-    // Derive mode from primary/secondary
-    const providerMode = primary === 'local_ollama' && (secondary === 'none' || !secondary)
-        ? 'local'
-        : primary === 'openai' || primary === 'gemini'
-            ? 'cloud'
-            : 'hybrid';
-
-    const setProviderMode = (mode) => {
-        if (mode === 'local') {
-            setPrimary('local_ollama');
-            setSecondary('none');
-        } else if (mode === 'cloud') {
-            setPrimary('openai');
-            setSecondary('none');
-        } else {
-            setPrimary('local_ollama');
-            setSecondary('openai');
-        }
-    };
-
-    // After save: test connection + fetch diagnostics
-    const handleSaveAndTest = async () => {
-        await handleSave();
+    const handleTestConnection = async () => {
+        setTesting(true);
         setConnectionStatus({ status: 'testing' });
         try {
             const res = await fetch('/api/ai/test-connection', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ provider: primary }),
+                body: JSON.stringify({ provider: 'gemini' }),
             });
             const data = await res.json();
             setConnectionStatus(data);
         } catch {
             setConnectionStatus({ status: 'failed', error: 'Connection test failed' });
         }
-        // Fetch diagnostics
         try {
             const diag = await fetch('/api/ai/providers').then(r => r.json());
             setDiagnostics(diag);
         } catch { /* ignore */ }
+        setTesting(false);
     };
-
-    if (loading) {
-        return <div className="p-8 flex items-center gap-3 text-industrial-500"><Loader2 className="w-5 h-5 animate-spin" /> Loading configuration...</div>;
-    }
-
-    const needsOpenAI = primary === 'openai' || secondary === 'openai';
-    const needsGemini = primary === 'gemini' || secondary === 'gemini';
-    const openaiInvalid = needsOpenAI && validateState.openai === 'INVALID';
-    const geminiInvalid = needsGemini && validateState.gemini === 'INVALID';
-    const disableSave = (needsOpenAI && !openaiKey) || (needsGemini && !geminiKey) || openaiInvalid || geminiInvalid;
 
     return (
         <div className="h-full overflow-y-auto">
@@ -981,39 +941,27 @@ export const SettingsPage = () => {
                 <h2 className="text-2xl font-bold text-industrial-800 mb-6">System Settings</h2>
 
                 <div className="space-y-6">
-                    {/* AI Provider Section */}
+                    {/* Architecture Read-Only Section */}
                     <div className="bg-white p-6 rounded-xl border border-industrial-200 shadow-sm space-y-5">
                         <h3 className="text-lg font-bold text-industrial-800 border-b border-industrial-100 pb-3 flex items-center gap-2">
-                            <Cpu className="w-5 h-5 text-primary-600" /> AI Provider Configuration
+                            <Cpu className="w-5 h-5 text-primary-600" /> Cloud Native Architecture
                         </h3>
 
                         <div className="space-y-4">
-                            <label className="text-xs font-semibold text-industrial-600 uppercase">AI Provider Mode</label>
-                            <div className="space-y-2">
-                                {[['local', 'Local LLM (Ollama)', 'Uses your local machine. No API key needed.'],
-                                ['cloud', 'Cloud (OpenAI)', 'Requires OpenAI API key. Best quality.'],
-                                ['hybrid', 'Hybrid (Local + Cloud Fallback)', 'Tries local first, falls back to cloud.']
-                                ].map(([val, label, desc]) => (
-                                    <label key={val}
-                                        className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${providerMode === val
-                                            ? 'border-primary-400 bg-primary-50 ring-1 ring-primary-200'
-                                            : 'border-industrial-200 hover:border-industrial-300'
-                                            }`}
-                                    >
-                                        <input
-                                            type="radio"
-                                            name="providerMode"
-                                            value={val}
-                                            checked={providerMode === val}
-                                            onChange={() => setProviderMode(val)}
-                                            className="mt-0.5 w-4 h-4 text-primary-600 focus:ring-primary-500"
-                                        />
-                                        <div>
-                                            <div className="text-sm font-bold text-industrial-800">{label}</div>
-                                            <div className="text-xs text-industrial-500">{desc}</div>
-                                        </div>
-                                    </label>
-                                ))}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="p-4 rounded-lg border border-industrial-200 bg-industrial-50">
+                                    <div className="text-sm font-bold text-industrial-800">LLM Provider</div>
+                                    <div className="text-xs text-industrial-500 mt-1">Google Gemini 1.5 Flash (Cloud Run)</div>
+                                </div>
+                                <div className="p-4 rounded-lg border border-industrial-200 bg-industrial-50">
+                                    <div className="text-sm font-bold text-industrial-800">Embeddings</div>
+                                    <div className="text-xs text-industrial-500 mt-1">Google Gemini Embeddings API</div>
+                                </div>
+                            </div>
+                            
+                            <div className="p-4 rounded-lg border border-industrial-200 bg-industrial-50">
+                                <div className="text-sm font-bold text-industrial-800">Vector Database</div>
+                                <div className="text-xs text-industrial-500 mt-1">Qdrant Cloud</div>
                             </div>
                         </div>
 
@@ -1031,105 +979,15 @@ export const SettingsPage = () => {
                             </div>
                         )}
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
-                            <div className="space-y-2">
-                                <label className="text-xs font-semibold text-industrial-600 uppercase">Cloud SLA Timeout (ms)</label>
-                                <input
-                                    type="number"
-                                    value={cfgTimeout}
-                                    onChange={e => setCfgTimeout(e.target.value)}
-                                    className="w-full border border-industrial-200 rounded-lg px-3 py-2 text-sm text-industrial-800 focus:outline-none focus:border-primary-400"
-                                />
-                                <p className="text-xs text-industrial-400">Local TTFT is dynamically bounded (min 20s).</p>
-                            </div>
-
-                            <div className="flex items-center gap-3 pt-6">
-                                <input
-                                    type="checkbox"
-                                    id="speculative"
-                                    checked={speculative}
-                                    onChange={e => setSpeculative(e.target.checked)}
-                                    className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500 cursor-pointer"
-                                />
-                                <div className="flex flex-col">
-                                    <label htmlFor="speculative" className="text-sm font-bold text-industrial-700 cursor-pointer">
-                                        Enable Speculative Racing Engine
-                                    </label>
-                                    <p className="text-xs text-industrial-400">Fires fallback provider proactively if primary lags.</p>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* API Keys */}
-                        <div className="space-y-4 pt-4 border-t border-industrial-100">
-                            <h4 className="text-sm font-bold text-industrial-700">Cloud Credentials</h4>
-                            <div className="space-y-3">
-                                <div>
-                                    <label className="text-xs font-medium text-industrial-600 mb-1 flex items-center justify-between">
-                                        OpenAI API Key
-                                        {(needsOpenAI && !openaiKey) && <span className="text-red-500 font-bold">* REQUIRED *</span>}
-                                    </label>
-                                    <input
-                                        type="password"
-                                        value={openaiKey}
-                                        onChange={e => { setOpenaiKey(e.target.value); setValidateState(p => ({ ...p, openai: null })); }}
-                                        onBlur={() => handleValidateKey('openai')}
-                                        placeholder="sk-..."
-                                        className="w-full border border-industrial-200 rounded-lg px-3 py-2 text-sm text-industrial-800 focus:outline-none focus:border-primary-400 font-mono"
-                                    />
-                                    {validateState.openai === 'validating' && (
-                                        <div className="mt-1.5 flex items-center gap-1.5 text-xs text-industrial-500">
-                                            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Validating…
-                                        </div>
-                                    )}
-                                    {validateState.openai && validateState.openai !== 'validating' && (
-                                        <div className={`mt-1.5 flex items-center gap-1.5 text-xs font-semibold ${validateState.openai === 'VALID' ? 'text-green-600' : 'text-red-600'
-                                            }`}>
-                                            {validateState.openai === 'VALID' ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                                            {validateDetail.openai}
-                                        </div>
-                                    )}
-                                </div>
-                                <div>
-                                    <label className="text-xs font-medium text-industrial-600 mb-1 flex items-center justify-between">
-                                        Google Gemini API Key
-                                        {(needsGemini && !geminiKey) && <span className="text-red-500 font-bold">* REQUIRED *</span>}
-                                    </label>
-                                    <input
-                                        type="password"
-                                        value={geminiKey}
-                                        onChange={e => { setGeminiKey(e.target.value); setValidateState(p => ({ ...p, gemini: null })); }}
-                                        onBlur={() => handleValidateKey('gemini')}
-                                        placeholder="AIzaSy..."
-                                        className="w-full border border-industrial-200 rounded-lg px-3 py-2 text-sm text-industrial-800 focus:outline-none focus:border-primary-400 font-mono"
-                                    />
-                                    {validateState.gemini === 'validating' && (
-                                        <div className="mt-1.5 flex items-center gap-1.5 text-xs text-industrial-500">
-                                            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Validating…
-                                        </div>
-                                    )}
-                                    {validateState.gemini && validateState.gemini !== 'validating' && (
-                                        <div className={`mt-1.5 flex items-center gap-1.5 text-xs font-semibold ${validateState.gemini === 'VALID' ? 'text-green-600' : 'text-red-600'
-                                            }`}>
-                                            {validateState.gemini === 'VALID' ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                                            {validateDetail.gemini}
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="pt-4 flex items-center gap-4">
+                        <div className="pt-4 border-t border-industrial-100 flex items-center gap-4">
                             <button
-                                onClick={handleSaveAndTest}
-                                disabled={saving || disableSave}
+                                onClick={handleTestConnection}
+                                disabled={testing}
                                 className="bg-primary-600 text-white px-5 py-2.5 rounded-lg text-sm font-bold hover:bg-primary-700 disabled:opacity-50 transition-colors flex items-center gap-2"
                             >
-                                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                                Save & Test Connection
+                                {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                                Test Cloud Services Connection
                             </button>
-                            {success && <span className="text-sm font-bold text-green-600 flex items-center gap-1.5"><CheckCircle2 className="w-4 h-4" /> Settings deployed live.</span>}
-                            {error && <span className="text-sm font-bold text-red-600 flex items-center gap-1.5"><AlertTriangle className="w-4 h-4" /> {error}</span>}
                         </div>
                     </div>
 
@@ -1139,17 +997,14 @@ export const SettingsPage = () => {
                             onClick={() => { setShowDiag(!showDiag); if (!diagnostics) fetch('/api/ai/providers').then(r => r.json()).then(setDiagnostics).catch(() => { }); }}
                             className="w-full text-left px-6 py-4 flex items-center justify-between hover:bg-industrial-50 transition-colors"
                         >
-                            <span className="text-sm font-bold text-industrial-700 flex items-center gap-2"><Cpu className="w-4 h-4 text-industrial-400" /> Developer Diagnostics</span>
+                            <span className="text-sm font-bold text-industrial-700 flex items-center gap-2"><Database className="w-4 h-4 text-industrial-400" /> Developer Diagnostics</span>
                             <span className="text-xs text-industrial-400">{showDiag ? '▲ Collapse' : '▼ Expand'}</span>
                         </button>
                         {showDiag && diagnostics && (
                             <div className="px-6 pb-4 border-t border-industrial-100 space-y-2">
                                 <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-industrial-600 pt-3">
                                     <span className="font-bold">Primary</span><span className="font-mono">{diagnostics.primary}</span>
-                                    <span className="font-bold">Secondary</span><span className="font-mono">{diagnostics.secondary || '—'}</span>
-                                    <span className="font-bold">Circuit State</span>
-                                    <span className={`font-bold ${diagnostics.circuit_state === 'CLOSED' ? 'text-green-600' : diagnostics.circuit_state === 'OPEN' ? 'text-red-600' : 'text-yellow-600'}`}>{diagnostics.circuit_state}</span>
-                                    <span className="font-bold">Speculative</span><span>{diagnostics.speculative_fallback ? 'Enabled' : 'Disabled'}</span>
+                                    <span className="font-bold">Secondary</span><span className="font-mono">{diagnostics.secondary || 'none'}</span>
                                 </div>
                                 <div className="pt-2">
                                     <span className="text-xs font-bold text-industrial-600">Registered Providers</span>
@@ -1165,12 +1020,6 @@ export const SettingsPage = () => {
                                 </div>
                             </div>
                         )}
-                    </div>
-
-                    <div className="bg-white p-6 rounded-xl border border-industrial-200 shadow-sm">
-                        <h3 className="text-sm font-bold text-industrial-800 mb-2 flex items-center gap-2"><Database className="w-4 h-4 text-rose-500" /> Vector Database</h3>
-                        <p className="text-sm text-industrial-500 mb-1">Provider: <strong>Qdrant Native Engine</strong></p>
-                        <p className="text-sm text-industrial-500">Endpoint: <strong>localhost:6333</strong></p>
                     </div>
                 </div>
             </div>

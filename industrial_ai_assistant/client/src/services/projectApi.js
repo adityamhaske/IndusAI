@@ -22,6 +22,12 @@ export const projectApi = {
         return data;
     },
 
+    async getIngestStatus(jobId) {
+        const res = await fetch(`/api/project/ingest/status/${encodeURIComponent(jobId)}`);
+        if (!res.ok) throw new Error('Could not reach backend to check status.');
+        return await res.json();
+    },
+
     async debugPath(folderPath) {
         const res = await fetch(`/api/project/debug-path?folder_path=${encodeURIComponent(folderPath)}`);
         if (!res.ok) throw new Error('Could not reach backend.');

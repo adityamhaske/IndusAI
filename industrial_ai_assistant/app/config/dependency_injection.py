@@ -8,11 +8,9 @@ from app.core.interfaces.retriever_interface import RetrieverInterface
 from app.core.interfaces.chunker_interface import ChunkerInterface
 
 # Implementations
-from app.ai_providers.local_ollama_provider import LocalOllamaProvider
 from app.ai_providers.openai_provider import OpenAIProvider
 from app.ai_providers.gemini_provider import GeminiProvider
 from app.services.ai_gateway import AIGatewayService, FallbackPolicy
-from app.embeddings.sentence_transformer_embedder import SentenceTransformerEmbedder
 from app.embeddings.mock_embedder import MockEmbedder
 from app.vector_store.qdrant_store import QdrantStore
 from app.vector_store.in_memory_store import InMemoryStore
@@ -39,38 +37,43 @@ class Container:
         self._db_client = SQLiteClient(db_path=settings.DB_PATH)
         
         # 1. Embeddings
-        if settings.EMBEDDING_PROVIDER == "sentence_transformers":
-            self._embedder = SentenceTransformerEmbedder(model_name=settings.EMBEDDING_MODEL_NAME)
+        if settings.EMBEDDING_PROVIDER == "gemini":
+            from app.embeddings.gemini_embedder import GeminiEmbedder
+            self._embedder = GeminiEmbedder()
         else:
             self._embedder = MockEmbedder()
             
         # 2. Vector Store
-        if settings.VECTOR_STORE_TYPE == "qdrant":
+        if settings.VECTOR_STORE_TYPE in ["qdrant", "cloud"]:
             self._vector_store = QdrantStore(
                 host=settings.QDRANT_HOST,
                 port=settings.QDRANT_PORT,
-                collection_name=settings.QDRANT_COLLECTION
+                collection_name=settings.QDRANT_COLLECTION,
+                url=settings.QDRANT_URL,
+                api_key=settings.QDRANT_API_KEY
             )
         else:
             self._vector_store = InMemoryStore()
             
         # 3. AI Gateway (replaces raw LLMInterface)
         providers = {}
-        if settings.LLM_PROVIDER == "ollama":
-            providers["local_ollama"] = LocalOllamaProvider(base_url=settings.OLLAMA_BASE_URL, model=settings.OLLAMA_MODEL)
+        if settings.LLM_PROVIDER == "gemini":
+            from app.ai_providers.gemini_provider import GeminiProvider
+            providers["gemini"] = GeminiProvider(api_key=settings.GEMINI_API_KEY)
         else:
-            providers["local_ollama"] = LocalOllamaProvider(base_url="http://mock", model="mock")
+            # Fallback mock provider if none configured
+            pass
             
         if settings.ENABLE_CLOUD_PROVIDERS:
             # Inject securely mapped environment secrets
             if settings.OPENAI_API_KEY:
                 providers["openai"] = OpenAIProvider(api_key=settings.OPENAI_API_KEY)
-            if settings.GEMINI_API_KEY:
+            if settings.GEMINI_API_KEY and "gemini" not in providers:
                 providers["gemini"] = GeminiProvider(api_key=settings.GEMINI_API_KEY)
                 
         # Canary deployment: define the fallback route
         policy = FallbackPolicy(
-            primary="local_ollama",
+            primary=settings.LLM_PROVIDER,
             secondary="openai" if "openai" in providers else None,
             timeout_ms=8000,
             json_enforced=True

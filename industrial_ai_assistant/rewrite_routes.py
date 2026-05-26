@@ -1,4 +1,8 @@
-"""
+import os
+from pathlib import Path
+
+file_path = "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/api/routes_ingest_upload.py"
+content = """\"\"\"
 File-upload ingestion endpoint — Phase 20 Persistent Project Architecture.
 
 POST /api/project/ingest-upload
@@ -13,7 +17,7 @@ Phase 20 changes:
   - CSV files are registered in TelemetryDataset for the persistent dropdown.
   - Project record is upserted in DB before ingestion runs.
   - After ingestion, ProjectFile table is synced from .indusai_index.json.
-"""
+\"\"\"
 from __future__ import annotations
 
 import hashlib
@@ -122,13 +126,13 @@ async def ingest_upload(
     project_id: str = Form(default="default"),
     files: list[UploadFile] = File(...),
 ):
-    """
+    \"\"\"
     Accept a folder's files from the browser's <input webkitdirectory> picker.
 
     Phase 20: does NOT wipe existing project storage.
     Only overwrites files whose content hash has changed.
     Registers CSVs as TelemetryDatasets.
-    """
+    \"\"\"
     if not files:
         return JSONResponse(status_code=400, content={"error": "NO_FILES", "message": "No files uploaded."})
 
@@ -223,3 +227,7 @@ async def ingest_upload(
     )
 
     return JSONResponse(status_code=202, content={"job_id": job_id})
+"""
+
+with open(file_path, "w", encoding="utf-8") as f:
+    f.write(content)

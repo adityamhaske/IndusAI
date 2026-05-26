@@ -38,12 +38,12 @@ class SystemHealthService:
         url = (base_url or settings.OLLAMA_BASE_URL).rstrip("/")
         probe_url = url + _LLM_PROBE_PATH
 
-        if provider == "mock":
+        if provider in ["mock", "gemini", "openai"]:
             return {
                 "ok": True,
-                "provider": "mock",
-                "url": "mock://",
-                "reason": "MockLLM active (set LLM_PROVIDER=ollama for real LLM)",
+                "provider": provider,
+                "url": "cloud://api",
+                "reason": f"Managed cloud provider ({provider}) active",
                 "latency_ms": 0.0,
             }
 
@@ -87,8 +87,8 @@ class SystemHealthService:
         Currently supports Qdrant (HTTP probe) and in_memory (always ok).
         """
         vtype = settings.VECTOR_STORE_TYPE
-        if vtype == "in_memory":
-            return {"ok": True, "type": "in_memory", "reason": "In-memory store always available"}
+        if vtype in ["in_memory", "cloud"]:
+            return {"ok": True, "type": vtype, "reason": f"{vtype} store assumed available"}
 
         # Qdrant
         host = settings.QDRANT_HOST

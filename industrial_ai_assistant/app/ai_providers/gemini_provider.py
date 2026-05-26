@@ -1,5 +1,5 @@
 import time
-import httpx
+import google.generativeai as genai
 from typing import Dict, Any, Optional
 from app.core.interfaces.ai_provider import AIProvider
 from app.models.ai_models import AIRequest, AIResponse
@@ -7,22 +7,19 @@ from app.models.ai_models import AIRequest, AIResponse
 class GeminiProvider(AIProvider):
     """
     Implements the AIProvider interface for Google Gemini models (gemini-1.5-pro, gemini-1.5-flash).
-    Uses a shared async client to prevent connection leaks under heavy load.
+    Uses the official google-generativeai SDK.
     """
     
-    def __init__(self, api_key: str, model: str = "gemini-1.5-flash"):
+    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
         if not api_key:
             import os
             api_key = os.environ.get("GEMINI_API_KEY", "")
             
         self.api_key = api_key
-        self.model = model
-        self.base_url = "https://generativelanguage.googleapis.com"
-        self._sync_client = httpx.Client(
-            base_url=self.base_url,
-            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
-            timeout=None
-        )
+        self.model_name = model
+        
+        if self.api_key:
+            genai.configure(api_key=self.api_key)
 
     @property
     def provider_name(self) -> str:
@@ -38,74 +35,38 @@ class GeminiProvider(AIProvider):
         if not self.api_key:
             return self._build_error_response("Gemini API key missing from configuration", "CONNECTION", start_time)
 
-        # Gemini expects a specific JSON body mapping
-        contents = []
-        if request.system_prompt:
-            contents.append({"role": "user", "parts": [{"text": f"System Instruction: {request.system_prompt}"}]})
-            contents.append({"role": "model", "parts": [{"text": "Acknowledged."}]})
-             
-        contents.append({"role": "user", "parts": [{"text": request.prompt}]})
-
-        payload = {
-            "contents": contents,
-            "generationConfig": {
-                "temperature": request.temperature,
-                "maxOutputTokens": request.max_tokens,
-            }
-        }
-        
-        if request.response_format == "json":
-            payload["generationConfig"]["responseMimeType"] = "application/json"
-
-        headers = {
-            "Content-Type": "application/json"
-        }
-        
-        # No timeout — let Gemini take as long as needed
         try:
-            url = f"/v1beta/models/{self.model}:streamGenerateContent?key={self.api_key}&alt=sse"
+            model = genai.GenerativeModel(
+                model_name=self.model_name,
+                generation_config={
+                    "temperature": request.temperature,
+                    "max_output_tokens": request.max_tokens,
+                }
+            )
+
+            full_prompt = request.prompt
+            if request.system_prompt:
+                full_prompt = f"System Instruction: {request.system_prompt}\n\n{request.prompt}"
+
+            response = model.generate_content(full_prompt)
+            raw_text = response.text
             
-            with self._sync_client.stream(
-                "POST",
-                url,
-                json=payload,
-                headers=headers,
-                timeout=httpx.Timeout(None)
-            ) as response:
-                response.raise_for_status()
-                
-                raw_text = ""
-                prompt_tokens = 0
-                completion_tokens = 0
-                last_token_timestamp = time.perf_counter()
-                first_token_received = False
-                
-                import json
-                for line in response.iter_lines():
-                        
-                    if line.startswith("data: "):
-                        data_str = line[6:]
-                        try:
-                            chunk = json.loads(data_str)
-                            candidates = chunk.get("candidates", [])
-                            if candidates:
-                                parts = candidates[0].get("content", {}).get("parts", [])
-                                if parts and "text" in parts[0]:
-                                    raw_text += parts[0]["text"]
-                                    first_token_received = True
-                                    last_token_timestamp = current_time
-                                    
-                            usage = chunk.get("usageMetadata", {})
-                            if usage:
-                                prompt_tokens = usage.get("promptTokenCount", prompt_tokens)
-                                completion_tokens = usage.get("candidatesTokenCount", completion_tokens)
-                        except json.JSONDecodeError:
-                            continue
+            # Note: google.generativeai doesn't easily expose exact token counts in the text response 
+            # without additional API calls, so we mock or estimate them if needed.
+            prompt_tokens = 0
+            completion_tokens = 0
             
             parsed_json = None
             if request.response_format == "json":
+                import json
                 try:
-                    parsed_json = json.loads(raw_text)
+                    # Clean up markdown code blocks if gemini returns them
+                    cleaned_text = raw_text
+                    if cleaned_text.startswith("```json"):
+                        cleaned_text = cleaned_text[7:]
+                        if cleaned_text.endswith("```"):
+                            cleaned_text = cleaned_text[:-3]
+                    parsed_json = json.loads(cleaned_text)
                 except json.JSONDecodeError as decode_err:
                     return self._build_error_response(f"Malformed JSON output: {str(decode_err)}", "PARSE", start_time, raw_output=raw_text)
 
@@ -113,7 +74,7 @@ class GeminiProvider(AIProvider):
             return AIResponse(
                 raw_output=raw_text,
                 parsed_output=parsed_json,
-                model_name=self.model,
+                model_name=self.model_name,
                 provider_name=self.provider_name,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
@@ -122,10 +83,6 @@ class GeminiProvider(AIProvider):
                 error=None
             )
 
-        except httpx.HTTPStatusError as e:
-            return self._build_error_response(f"Gemini HTTP error: {e.response.status_code} - {e.response.text[:100]}", "CONNECTION", start_time)
-        except httpx.RequestError as e:
-            return self._build_error_response(f"Gemini connection error: {str(e)}", "CONNECTION", start_time)
         except Exception as e:
             return self._build_error_response(f"Unexpected Gemini exception: {str(e)}", "UNKNOWN", start_time)
 
@@ -133,7 +90,7 @@ class GeminiProvider(AIProvider):
         latency = int((time.perf_counter() - start_time) * 1000)
         return AIResponse(
             raw_output=raw_output,
-            model_name=self.model,
+            model_name=self.model_name,
             provider_name=self.provider_name,
             latency_ms=latency,
             success=False,
