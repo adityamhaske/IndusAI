@@ -403,7 +403,7 @@ def get_semantic_index(embedder=None, host="127.0.0.1", port=6333) -> SemanticIn
     global _instance
     if _instance is None:
         if embedder is None:
-            from app.embeddings.mock_embedder import MockEmbedder
-            embedder = MockEmbedder()
+            from app.embeddings.gemini_embedder import GeminiEmbedder
+            embedder = GeminiEmbedder()
         _instance = SemanticIndex(embedder=embedder, qdrant_host=host, qdrant_port=port)
     return _instance

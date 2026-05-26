@@ -53,7 +53,7 @@ from app.services.rag_service import RAGService
 from app.utils.fault_confidence import compute_confidence
 from app.utils.confidence_v2 import compute_confidence_v2
 from app.prompts.prompt_v2 import PromptComposerV2
-from app.services.intelligent_cache import get_intelligent_cache
+
 from app.utils.fault_statistics import (
     _timestamps_for_code,
     check_metric_integrity,
@@ -74,19 +74,21 @@ _fault_memory_instance = None
 _fault_experience_instance = None
 
 
-def _get_fault_memory(db_client):
+def _get_fault_memory():
     global _fault_memory_instance
     if _fault_memory_instance is None:
         from app.services.fault_memory import FaultMemoryService
-        _fault_memory_instance = FaultMemoryService(db_client)
+        from app.storage.firestore_client import get_firestore
+        _fault_memory_instance = FaultMemoryService(get_firestore())
     return _fault_memory_instance
 
 
-def _get_fault_experience(db_client):
+def _get_fault_experience():
     global _fault_experience_instance
     if _fault_experience_instance is None:
         from app.services.fault_experience_index import FaultExperienceIndex
-        _fault_experience_instance = FaultExperienceIndex(db_client)
+        from app.storage.firestore_client import get_firestore
+        _fault_experience_instance = FaultExperienceIndex(get_firestore())
     return _fault_experience_instance
 
 
@@ -140,23 +142,11 @@ class FaultAnalysisOrchestrator:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def analyze_fault(self, request: FaultAnalysisRequest) -> FaultAnalysisV2Response:
-        """Full pipeline: preflight → stats → RAG → LLM → validate → return."""
+    def analyze_fault(self, request: FaultAnalysisRequest, uid: str = "") -> FaultAnalysisV2Response:
+        """Full pipeline: stats → memory → RAG → LLM → validate → return."""
         t_total_start = time.perf_counter()
 
-        # ── Step 0: Preflight connectivity check ─────────────────────────────
-        hs = self._get_health_service()
-        llm_status = hs.check_llm()
-        if not llm_status["ok"]:
-            reason = llm_status.get("reason", "Unknown reason")
-            logger.error(
-                "LLM pre-flight failed (provider=%s url=%s): %s",
-                llm_status.get("provider"), llm_status.get("url"), reason
-            )
-            raise LLMConnectionError(
-                f"Local LLM ({llm_status.get('provider', 'unknown')}) is not reachable: {reason}. "
-                f"Please start Ollama: `ollama serve`"
-            )
+        # Preflight removed — BYOK provider errors are caught at LLM call time
 
         # ── Step 1: Load dataset & row ────────────────────────────────────────
         ds = self._fault_svc._store.get(request.project_id)
@@ -219,26 +209,25 @@ class FaultAnalysisOrchestrator:
             "integrity_passed": integrity_passed
         }
 
-        # ── Step 3: Record into Fault Memory (Phase 21) ───────────────────────
+        # ── Step 3: Record into Fault Memory ────────────────────────────────
         historical_pattern = None
         past_experience = None
         try:
-            from app.config.dependency_injection import get_container
-            container = get_container()
-            fault_mem = _get_fault_memory(container.db_client)
+            fault_mem = _get_fault_memory()
             fault_mem.record_fault(
+                uid=uid,
                 machine_id=device,
                 fault_code=fault_code,
                 timestamp=ref_ts,
                 co_occurring_fault=co_fault,
                 project_id=request.project_id,
             )
-            historical_pattern = fault_mem.get_pattern_summary(fault_code, machine_id=device)
+            historical_pattern = fault_mem.get_pattern_summary(uid, fault_code, machine_id=device)
 
-            exp_idx = _get_fault_experience(container.db_client)
-            past_experience = exp_idx.get_best_experience(fault_code, machine_id=device)
+            exp_idx = _get_fault_experience()
+            past_experience = exp_idx.get_best_experience(uid, fault_code, machine_id=device)
         except Exception as mem_exc:
-            logger.warning("Phase 21 memory layer failed (non-fatal): %s", mem_exc)
+            logger.warning("Memory layer failed (non-fatal): %s", mem_exc)
 
         # ── Step 4: RAG retrieval (hybrid: BM25 + Vector + RRF) ──────────────
         rag_docs, rag_ms = self._rag.retrieve_for_fault(
@@ -253,20 +242,7 @@ class FaultAnalysisOrchestrator:
         if not integrity_passed:
             logger.warning("Stat integrity failed for row %d. LLM will continue but user should manually verify.", request.row_id)
 
-        # ── Step 5: Check Intelligent Cache (Phase 21) ────────────────────────
-        cache = get_intelligent_cache()
-        context_ids = [d.source_file for d in rag_docs]
-        cache_key = cache.build_key(
-            query=request.question or f"analyze_{fault_code}",
-            context_ids=context_ids,
-            stats_snapshot={"occ_1h": occ_1h, "occ_24h": occ_24h, "burst": burst, "trend": trend},
-        )
-        cached = cache.get(cache_key)
-        if cached is not None:
-            logger.info("Cache HIT for fault=%s row=%d — returning cached response", fault_code, request.row_id)
-            return cached
-
-        # ── Step 6: Classify Intent + Build PromptV2 ─────────────────────────
+        # ── Step 5: Classify Intent + Build PromptV2 ───────────────────────
         intent_val = IntentType.FAULT_ANALYSIS.value
         if request.question:
             intent_result = classify(request.question)
@@ -383,11 +359,12 @@ class FaultAnalysisOrchestrator:
         # Use V2 label as the public-facing confidence
         final_confidence = confidence_label
 
-        # ── Step 10: Store Experience (Phase 21 — self-improving) ────────────
+        # ── Step 10: Store Experience (self-improving) ─────────────────────
         try:
-            if fault_summary and not fault_summary.startswith("["):
-                exp_idx = _get_fault_experience(get_container().db_client)
+            if fault_summary and not fault_summary.startswith("[") and uid:
+                exp_idx = _get_fault_experience()
                 exp_idx.store_experience(
+                    uid=uid,
                     fault_code=fault_code,
                     explanation_text=fault_summary,
                     confidence=confidence_numeric,
@@ -399,6 +376,7 @@ class FaultAnalysisOrchestrator:
             logger.warning("Experience store failed (non-fatal): %s", exp_exc)
 
         total_ms = (time.perf_counter() - t_total_start) * 1000
+        # Removed: intelligent cache put (cache deleted per architecture redesign)
 
         # ── Step 11: Build & Cache Response ───────────────────────────────────
         response = FaultAnalysisV2Response(
@@ -424,7 +402,7 @@ class FaultAnalysisOrchestrator:
             total_latency_ms=round(total_ms, 1),
         )
 
-        cache.put(cache_key, response)
+
 
         # ── Observability (Phase 21) ─────────────────────────────────────────
         logger.info(

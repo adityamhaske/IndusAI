@@ -1,4 +1,15 @@
+"""
+Dependency Injection — Per-request factory for cloud-native architecture.
+
+No more global singletons for user-scoped resources.
+System-level singletons (Firestore, Qdrant connection) are OK.
+User-scoped resources (LLM provider, embedder, collections) are created per-request.
+"""
+from __future__ import annotations
+
 from functools import lru_cache
+from typing import Optional
+
 from app.config.settings import settings
 
 # Interfaces
@@ -8,165 +19,154 @@ from app.core.interfaces.retriever_interface import RetrieverInterface
 from app.core.interfaces.chunker_interface import ChunkerInterface
 
 # Implementations
-from app.ai_providers.openai_provider import OpenAIProvider
-from app.ai_providers.gemini_provider import GeminiProvider
-from app.services.ai_gateway import AIGatewayService, FallbackPolicy
-from app.embeddings.mock_embedder import MockEmbedder
 from app.vector_store.qdrant_store import QdrantStore
-from app.vector_store.in_memory_store import InMemoryStore
 from app.retrieval.hybrid_retriever import HybridRetriever
 from app.retrieval.keyword_search import KeywordSearch
 from app.retrieval.reranker import Reranker
 from app.chunking.semantic_chunker import SemanticChunker
-from app.chunking.fixed_token_chunker import FixedTokenChunker
-from app.ingestion.ingestion_manager import IngestionManager
 from app.ingestion.processors import PDFProcessor, L5XProcessor, ExcelProcessor
-from app.storage.sqlite_client import SQLiteClient
 
 from app.services.validation_service import ValidationService
 from app.services.history_service import HistoryService
-from app.services.log_service import LogService
 from app.services.project_service import ProjectService
 
 from app.services.rag_service import RAGService
 from app.services.fault_response_validator import FaultResponseValidator
 from app.services.fault_analysis_orchestrator import FaultAnalysisOrchestrator
 
+from app.storage.firestore_client import FirestoreClient, get_firestore
+
+
 class Container:
+    """
+    System-level container for shared, non-user-scoped resources.
+    
+    User-scoped resources (LLM, embeddings, per-user Qdrant collections)
+    are created via the BYOK factory in Phase 3, not stored here.
+    """
+
     def __init__(self):
-        self._db_client = SQLiteClient(db_path=settings.DB_PATH)
-        
-        # 1. Embeddings
-        if settings.EMBEDDING_PROVIDER == "gemini":
-            from app.embeddings.gemini_embedder import GeminiEmbedder
-            self._embedder = GeminiEmbedder()
-        else:
-            self._embedder = MockEmbedder()
-            
-        # 2. Vector Store
-        if settings.VECTOR_STORE_TYPE in ["qdrant", "cloud"]:
+        # 1. Firestore (replaces SQLite)
+        self._db = get_firestore()
+
+        # 2. Default Embedder — will be overridden per-user in Phase 3 (BYOK)
+        from app.embeddings.gemini_embedder import GeminiEmbedder
+        self._embedder = GeminiEmbedder()
+
+        # 3. Vector Store (Qdrant Cloud — shared connection, per-user collections)
+        if settings.QDRANT_URL:
             self._vector_store = QdrantStore(
-                host=settings.QDRANT_HOST,
-                port=settings.QDRANT_PORT,
-                collection_name=settings.QDRANT_COLLECTION,
                 url=settings.QDRANT_URL,
-                api_key=settings.QDRANT_API_KEY
+                api_key=settings.QDRANT_API_KEY,
+                collection_name="industrial_docs",  # default; overridden per-user
             )
         else:
-            self._vector_store = InMemoryStore()
-            
-        # 3. AI Gateway (replaces raw LLMInterface)
-        providers = {}
-        if settings.LLM_PROVIDER == "gemini":
-            from app.ai_providers.gemini_provider import GeminiProvider
-            providers["gemini"] = GeminiProvider(api_key=settings.GEMINI_API_KEY)
-        else:
-            # Fallback mock provider if none configured
-            pass
-            
-        if settings.ENABLE_CLOUD_PROVIDERS:
-            # Inject securely mapped environment secrets
-            if settings.OPENAI_API_KEY:
-                providers["openai"] = OpenAIProvider(api_key=settings.OPENAI_API_KEY)
-            if settings.GEMINI_API_KEY and "gemini" not in providers:
-                providers["gemini"] = GeminiProvider(api_key=settings.GEMINI_API_KEY)
-                
-        # Canary deployment: define the fallback route
-        policy = FallbackPolicy(
-            primary=settings.LLM_PROVIDER,
-            secondary="openai" if "openai" in providers else None,
-            timeout_ms=8000,
-            json_enforced=True
-        )
-        
-        self._llm_gateway = AIGatewayService(
-            providers=providers,
-            fallback_policy=policy,
-            failure_rate_threshold=0.5,
-            window_seconds=60,
-            max_daily_cost_usd=settings.MAX_DAILY_COST_USD,
-            enable_speculative_fallback=False  # Disabled for stabilization
-        )
-            
+            # Fallback: no vector store configured
+            self._vector_store = None
+
         # 4. Retrieval
         self._keyword_retriever = KeywordSearch()
         self._reranker = Reranker()
-        
-        if settings.RETRIEVER_TYPE == "hybrid":
+
+        if self._vector_store and self._embedder:
             self._retriever = HybridRetriever(
                 vector_store=self._vector_store,
                 embedder=self._embedder,
                 keyword_retriever=self._keyword_retriever,
-                reranker=self._reranker
+                reranker=self._reranker,
             )
         else:
-            # Fallback or other types could be handled here
             self._retriever = HybridRetriever(
                 vector_store=self._vector_store,
                 embedder=self._embedder,
-                keyword_retriever=self._keyword_retriever
+                keyword_retriever=self._keyword_retriever,
             )
-            
-        # 5. Services
+
+        # 5. Services (Firestore-backed)
         self._validator = ValidationService()
-        self._history_service = HistoryService(db_client=self._db_client)
-        self._log_service = LogService(db_client=self._db_client)
-        self._project_service = ProjectService(db_client=self._db_client)
-        
-        # 6. Ingestion
-        self._chunker = SemanticChunker() # Default to semantic
+        self._history_service = HistoryService(db=self._db)
+        self._project_service = ProjectService(db=self._db)
+
+        # 6. Ingestion processors
+        self._chunker = SemanticChunker()
         self._processors = {
             "pdf": PDFProcessor(self._chunker),
             "l5x": L5XProcessor(self._chunker),
-            "xlsx": ExcelProcessor(self._chunker)
+            "xlsx": ExcelProcessor(self._chunker),
         }
-        self._ingestion_manager = IngestionManager(
-            vector_store=self._vector_store,
-            embedder=self._embedder,
-            processors=self._processors
-        )
 
-        # 7. Fault Analysis Orchestration
+        # 7. RAG + Fault Analysis
         self._rag_service = RAGService(retriever=self._retriever)
         self._fault_response_validator = FaultResponseValidator()
-        self._fault_orchestrator = FaultAnalysisOrchestrator(
-            llm=self._llm_gateway,
-            rag_service=self._rag_service,
-            validator=self._fault_response_validator,
-        )
+
+        # AI Gateway will be initialized lazily per-user in Phase 3.
+        # For now, keep a default gateway for backward compatibility.
+        self._llm_gateway = None
+        self._fault_orchestrator = None
+
+    def _ensure_gateway(self):
+        """Lazy-init a default AI gateway for backward compat during Phase 2."""
+        if self._llm_gateway is None:
+            from app.services.ai_gateway import AIGatewayService, FallbackPolicy
+            from app.ai_providers.gemini_provider import GeminiProvider
+            import os
+            
+            providers = {}
+            gemini_key = os.getenv("GEMINI_API_KEY", "")
+            if gemini_key:
+                providers["gemini"] = GeminiProvider(api_key=gemini_key)
+            
+            policy = FallbackPolicy(
+                primary="gemini",
+                secondary=None,
+                timeout_ms=8000,
+                json_enforced=True,
+            )
+            self._llm_gateway = AIGatewayService(
+                providers=providers,
+                fallback_policy=policy,
+            )
+            self._fault_orchestrator = FaultAnalysisOrchestrator(
+                llm=self._llm_gateway,
+                rag_service=self._rag_service,
+                validator=self._fault_response_validator,
+            )
 
     # Accessors
     @property
-    def db_client(self):
-        return self._db_client
+    def firestore(self) -> FirestoreClient:
+        return self._db
 
     @property
-    def ai_gateway(self) -> AIGatewayService:
+    def ai_gateway(self):
+        self._ensure_gateway()
         return self._llm_gateway
-        
+
     @property
     def history_service(self) -> HistoryService:
         return self._history_service
-        
-    @property
-    def log_service(self) -> LogService:
-        return self._log_service
-        
+
     @property
     def project_service(self) -> ProjectService:
         return self._project_service
-        
-    @property
-    def ingestion_manager(self) -> IngestionManager:
-        return self._ingestion_manager
 
     @property
     def fault_orchestrator(self) -> FaultAnalysisOrchestrator:
+        self._ensure_gateway()
         return self._fault_orchestrator
 
     @property
     def rag_service(self) -> RAGService:
         return self._rag_service
+
+    @property
+    def vector_store(self):
+        return self._vector_store
+
+    @property
+    def embedder(self):
+        return self._embedder
+
 
 # Singleton instance
 @lru_cache()

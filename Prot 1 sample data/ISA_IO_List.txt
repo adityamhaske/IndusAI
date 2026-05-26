@@ -1,0 +1,12 @@
+PROJECT: CCI-NEXUS STATION 4
+DOCUMENT: ISA-S5.1 COMPLIANT I/O LIST
+REVISION: 1.2
+
+| Tag Number | Loop No | Service / Description    | Signal Type | Terminal | Cabinet       | Logic Association |
+|------------|---------|--------------------------|-------------|----------|---------------|-------------------|
+| ZS-402     | 402     | Vacuum Pressure Feedback | DI (24V)    | TB2:15   | Main_Panel_A  | ALM_3021          |
+| PX-101     | 101     | Pallet Entry Detection   | DI (24V)    | TB2:14   | Main_Panel_A  | SEQ_START         |
+| FY-401     | 401     | Vacuum Solenoid Control  | DO (24V)    | TB3:01   | Main_Panel_A  | VAC_ENGAGE        |
+| SZ-900     | 900     | Emergency Stop Circuit   | DI (Safe)   | TB1:01   | Main_Panel_A  | ERR_9000          |
+| UA-405     | 405     | Conveyor Drive Status    | AI (4-20mA) | TB3:05   | Field_Box_4   | FLT_2005          |
+| ZS-103     | 103     | Safety Gate Interlock    | DI (Safe)   | TB1:05   | Safety_Rack_1 | ERR_4040          |

@@ -1,104 +1,95 @@
+"""
+Resilience tests — adapted for thin routing layer.
+Circuit breaker, cost guard, and rate limiting were removed per architecture redesign.
+Tests now verify basic failure handling and fallback behavior.
+"""
 import pytest
-import asyncio
 from app.models.ai_models import AIRequest, AIResponse
 from app.services.ai_gateway import AIGatewayService, FallbackPolicy
-from app.ai_providers.local_ollama_provider import LocalOllamaProvider
+from app.core.interfaces.ai_provider import AIProvider
 
-class FailingProvider(LocalOllamaProvider):
-    def __init__(self, name="failing"):
-        super().__init__(base_url="http://mock", model="mock")
-        self.name = name
-        
+
+class FailingProvider(AIProvider):
+    def __init__(self, name: str = "failing"):
+        self._name = name
+        self.call_count = 0
+
+    @property
+    def provider_name(self) -> str:
+        return self._name
+
+    @property
+    def provider_type(self) -> str:
+        return "local"
+
     def generate(self, req: AIRequest) -> AIResponse:
+        self.call_count += 1
         raise TimeoutError("Test timeout")
 
-class ExpensiveProvider(LocalOllamaProvider):
-    def __init__(self, name="expensive"):
-        super().__init__(base_url="http://mock", model="mock")
-        self.name = name
-    
+
+class SucceedingProvider(AIProvider):
+    def __init__(self, name: str = "good"):
+        self._name = name
+        self.call_count = 0
+
+    @property
+    def provider_name(self) -> str:
+        return self._name
+
+    @property
+    def provider_type(self) -> str:
+        return "cloud"
+
     def generate(self, req: AIRequest) -> AIResponse:
+        self.call_count += 1
         return AIResponse(
-            raw_output='{"status": "ok"}',
-            success=True,
-            parsed_output={"status": "ok"},
-            model_name=self.name,
-            provider_name=self.name,
-            cost_usd=1.0 # Simulate massive cost
+            raw_output="OK", success=True, error=None,
+            model_name=self._name, provider_name=self._name
         )
 
 
-@pytest.fixture
-def resilience_gateway():
-    policy = FallbackPolicy(primary="fail", secondary="fail", timeout_ms=10)
-    return AIGatewayService(
-        providers={
-            "fail": FailingProvider(name="fail_local"),
-            "expensive": ExpensiveProvider(name="expensive_cloud")
-        },
-        fallback_policy=policy,
-        failure_rate_threshold=0.5,
-        window_seconds=10
+def test_repeated_failures_still_handled():
+    """Even after many failures, gateway returns clean error responses."""
+    failing = FailingProvider("primary")
+    gw = AIGatewayService(
+        providers={"primary": failing},
+        fallback_policy=FallbackPolicy(primary="primary"),
     )
+    req = AIRequest(prompt="Test", response_format="text")
+
+    for _ in range(10):
+        res = gw.execute(req)
+        assert res.success is False
+        assert res.error is not None
+
+    assert failing.call_count >= 10
 
 
-def test_circuit_breaker_opens_after_failures():
-    policy = FallbackPolicy(primary="fail", secondary=None, timeout_ms=10)
-    gateway = AIGatewayService(
-        providers={"fail": FailingProvider(name="fail_local")},
-        fallback_policy=policy,
-        failure_rate_threshold=0.5,
-        window_seconds=10
+def test_fallback_after_primary_timeout():
+    """Primary times out, secondary succeeds."""
+    primary = FailingProvider("primary")
+    secondary = SucceedingProvider("secondary")
+
+    gw = AIGatewayService(
+        providers={"primary": primary, "secondary": secondary},
+        fallback_policy=FallbackPolicy(primary="primary", secondary="secondary"),
     )
-    req = AIRequest(prompt="Test")
-    
-    # Send enough requests to breach the default min_requests_window (10)
-    for _ in range(12):
-        gateway.execute(req)
-        
-    # If we request again, it evaluates state -> trips to OPEN -> fail-fasts instantly
-    res = gateway.execute(req)
+
+    req = AIRequest(prompt="Test", response_format="text")
+    res = gw.execute(req)
+
+    assert res.success is True
+    assert res.provider_name == "secondary"
+
+
+def test_no_providers_returns_error():
+    """Gateway with empty providers returns error, never crashes."""
+    gw = AIGatewayService(
+        providers={},
+        fallback_policy=FallbackPolicy(primary="missing"),
+    )
+
+    req = AIRequest(prompt="Test", response_format="text")
+    res = gw.execute(req)
+
     assert res.success is False
-    assert gateway.circuit_state.value == "OPEN"
-    assert "Circuit Breaker OPEN" in res.error
-
-def test_cost_guard_blocks_expensive_cloud():
-    policy = FallbackPolicy(primary="fail", secondary="expensive", timeout_ms=100)
-    gateway = AIGatewayService(
-        providers={
-            "fail": FailingProvider(name="fail"),
-            "expensive": ExpensiveProvider(name="expensive")
-        },
-        fallback_policy=policy,
-        max_daily_cost_usd=2.5
-    )
-    req = AIRequest(prompt="Cost test")
-    
-    # 1. Simulate the gateway crossing the SLA guardrail budget threshold
-    gateway._add_cost(50.0)
-    
-    # 2. Attempt a request. Primary will fail/timeout, and fallback should be blocked.
-    res = gateway.execute(req)
-    
-    # Primary failed ("TimeoutError"), Secondary blocked ("DEGRADED_NO_CLOUD")
-    assert res.success is False
-    assert "timeout" in res.error.lower()
-    assert gateway.cost_guard_triggered is True
-
-def test_hard_concurrency_rate_limits():
-    policy = FallbackPolicy(primary="expensive", secondary=None, timeout_ms=100)
-    gateway = AIGatewayService(
-        providers={"expensive": ExpensiveProvider(name="expensive")},
-        fallback_policy=policy,
-        max_rpm=3
-    )
-    req = AIRequest(prompt="Rate test")
-    
-    gateway.execute(req)
-    gateway.execute(req)
-    gateway.execute(req)
-    
-    # 4th request in the minute should RATE_LIMIT
-    res4 = gateway.execute(req)
-    assert res4.success is False
-    assert "RATE_LIMIT" in res4.error

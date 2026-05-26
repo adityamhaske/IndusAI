@@ -1,0 +1,19 @@
+STATION 4 COMPONENT DATA SHEETS
+---------------------------------------------------------
+DEVICE ID: ZS-402 (Pressure Switch)
+Manufacturer: Nexus-Flow
+Model: NF-PS-01
+Operation: Closes circuit when vacuum reaches -0.8 bar.
+Maintenance: Clean sensor diaphragm every 5,000 cycles.
+Fault Analysis: If logic sends command FY-401 but ZS-402 is not received within 3s, check for suction cup degradation.
+
+DEVICE ID: UA-405 (Variable Frequency Drive)
+Manufacturer: Nexus-Drive
+Model: ND-VFD-V6
+Operation: Controls MTR_405 speed via Modbus/TCP or 4-20mA.
+Protection: Over-torque protection (120% threshold).
+Fault Analysis: FLT_2005 indicates a physical jam or bearing failure in the conveyor belt assembly.
+
+DEVICE ID: SZ-900 (Safety Relay)
+Type: Dual-Channel Category 4 Safety Relay.
+Fault Analysis: ERR_9000 triggers immediate power cutoff to all 'Q' (Output) addresses.

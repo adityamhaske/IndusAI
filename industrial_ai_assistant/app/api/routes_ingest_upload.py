@@ -23,8 +23,10 @@ import uuid
 import asyncio
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
 from fastapi.responses import JSONResponse
+
+from app.auth.firebase_auth import AuthenticatedUser, get_current_user
 
 from app.services.project_ingestion_pipeline import get_ingestion_pipeline
 
@@ -106,7 +108,10 @@ async def _run_ingestion_task(job_id: str, project_id: str, project_dir: Path, s
         _jobs[job_id]["error"] = str(exc)
 
 @router.get("/ingest/status/{job_id}")
-async def get_ingestion_status(job_id: str):
+async def get_ingestion_status(
+    job_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     job = _jobs.get(job_id)
     if not job:
         return JSONResponse(status_code=200, content={
@@ -121,6 +126,7 @@ async def ingest_upload(
     background_tasks: BackgroundTasks,
     project_id: str = Form(default="default"),
     files: list[UploadFile] = File(...),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
     Accept a folder's files from the browser's <input webkitdirectory> picker.

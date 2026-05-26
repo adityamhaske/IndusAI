@@ -30,12 +30,13 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from app.auth.firebase_auth import AuthenticatedUser, get_current_user
+
 from app.core.project_exceptions import (
     ProjectNotReadyError,
     ProjectStaleError,
 )
 from app.indexes.structured_index import get_structured_index
-from app.services.project_context_manager import get_project_context_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/knowledge", tags=["Knowledge"])
@@ -87,13 +88,20 @@ class KnowledgeQueryResponse(BaseModel):
 # ── Unified endpoint ───────────────────────────────────────────────────────────
 
 @router.post("/query", response_model=KnowledgeQueryResponse)
-def knowledge_query(body: KnowledgeQueryRequest):
+def knowledge_query(
+    body: KnowledgeQueryRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     t_start = time.perf_counter()
-    ctx = get_project_context_manager()
-    status = ctx.get_status(body.project_id)
+
+    # Check if project has indexed content via semantic index chunk count
+    from app.indexes.semantic_index import get_semantic_index
+    sem = get_semantic_index()
+    chunk_count = sem.collection_size(body.project_id)
+    project_loaded = chunk_count > 0
 
     # ── Route 1: Project loaded → always use Project Knowledge Engine ──────────
-    if status.project_loaded:
+    if project_loaded:
         return _route_project(body, t_start)
 
     # ── Route 2: No project. Tag-specific query? → fail-fast. ─────────────────
@@ -187,23 +195,24 @@ def _route_project(body: KnowledgeQueryRequest, t_start: float) -> KnowledgeQuer
             session_id = body.session_id or None
             conf_float = {"HIGH": 0.85, "MEDIUM": 0.55, "LOW": 0.25}.get(result.confidence, 0.5)
             if session_id:
-                hs.append_message(session_id, "user", body.question)
-                hs.append_message(session_id, "assistant", summary)
-                hs.complete_session(session_id, latency_ms=int(total_ms), confidence_score=conf_float)
+                hs.append_message(user.uid, session_id, "user", body.question)
+                hs.append_message(user.uid, session_id, "assistant", summary)
+                hs.complete_session(user.uid, session_id, latency_ms=int(total_ms), confidence_score=conf_float)
             else:
                 title = body.question[:60] + ("…" if len(body.question) > 60 else "")
                 gateway = get_container().ai_gateway
                 provider = gateway.policy.primary
                 sess = hs.create_session(
+                    uid=user.uid,
                     session_type="chat",
                     title=title,
                     provider=provider,
                     project_id=body.project_id,
                 )
-                hs.append_message(sess.id, "user", body.question)
-                hs.append_message(sess.id, "assistant", summary)
-                hs.complete_session(sess.id, latency_ms=int(total_ms), confidence_score=conf_float)
-                session_id = sess.id
+                hs.append_message(user.uid, sess.get("id"), "user", body.question)
+                hs.append_message(user.uid, sess.get("id"), "assistant", summary)
+                hs.complete_session(user.uid, sess.get("id"), latency_ms=int(total_ms), confidence_score=conf_float)
+                session_id = sess.get("id")
             resp.session_id = session_id or ""
         except Exception as _pe:
             logger.warning("Session persist failed (non-fatal): %s", _pe)

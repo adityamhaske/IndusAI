@@ -43,7 +43,6 @@ from app.models.project_models import (
     GeneralQueryResponseModel,
 )
 from app.services import query_classifier
-from app.services.project_context_manager import get_project_context_manager
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +67,11 @@ class QueryOrchestrator:
         project_id = request.project_id
 
         # ── Step 1: Fail-fast ──────────────────────────────────────────────────
-        ctx = get_project_context_manager()
-        ctx.require_ready(project_id)
+        from app.core.project_exceptions import ProjectNotReadyError
+        sem = get_semantic_index()
+        chunk_count = sem.collection_size(project_id)
+        if chunk_count == 0:
+            raise ProjectNotReadyError(project_id)
 
         # ── Step 2: Classify ──────────────────────────────────────────────────
         intent = query_classifier.classify(request.question)

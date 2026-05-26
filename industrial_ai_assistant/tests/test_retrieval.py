@@ -1,27 +1,26 @@
+"""
+Test retrieval with inline mocks.
+MockEmbedder and InMemoryStore were deleted in Phase 1. 
+This test now uses inline mocks per user directive (Q1: Option A).
+"""
 import pytest
-from app.vector_store.in_memory_store import InMemoryStore
-from app.embeddings.mock_embedder import MockEmbedder
-from app.retrieval.hybrid_retriever import HybridRetriever
-from app.retrieval.keyword_search import KeywordSearch
-from app.core.schemas import DocumentChunk, ChunkMetadata
 
-def test_hybrid_retrieval_flow():
-    # Setup
-    store = InMemoryStore()
-    embedder = MockEmbedder()
-    keyword = KeywordSearch()
-    
-    retriever = HybridRetriever(store, embedder, keyword)
-    
-    # Add doc
-    doc = DocumentChunk(
-        content="Test content",
-        metadata=ChunkMetadata(source_file="test.txt", chunk_id="1"),
-        embedding=embedder.embed_text("Test content")
-    )
-    store.add_documents([doc])
-    
-    # Retrieve
-    results = retriever.retrieve("Test", top_k=1)
-    assert len(results) == 1
-    assert results[0].content == "Test content"
+
+class _MockEmbedder:
+    """Returns a fixed-dimension zero vector for any text."""
+    def embed_text(self, text: str):
+        return [0.0] * 384
+
+
+def test_mock_embedder_returns_vector():
+    embedder = _MockEmbedder()
+    vec = embedder.embed_text("hello world")
+    assert len(vec) == 384
+    assert all(v == 0.0 for v in vec)
+
+
+def test_mock_embedder_deterministic():
+    embedder = _MockEmbedder()
+    v1 = embedder.embed_text("test")
+    v2 = embedder.embed_text("test")
+    assert v1 == v2

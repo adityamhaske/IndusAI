@@ -15,9 +15,11 @@ import logging
 from typing import Optional
 
 import pandas as pd
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+from app.auth.firebase_auth import AuthenticatedUser, get_current_user
 
 
 from app.core.fault_exceptions import (
@@ -60,6 +62,7 @@ def _fault_error(exc: Exception, http_status: int = 400) -> JSONResponse:
 async def upload_fault_csv(
     file: UploadFile = File(...),
     project_id: str = Form(default="default"),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
     Upload a PLC fault log CSV to Firebase Storage and process.
@@ -165,6 +168,7 @@ def list_faults(
     project_id: str = Query(default="default"),
     page: int = Query(default=1, ge=1),
     size: int = Query(default=100, ge=1, le=1000),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Return a paginated page of fault rows. Never sends full dataset."""
     try:
@@ -176,7 +180,10 @@ def list_faults(
 # ── GET /fault/summary ────────────────────────────────────────────────────────
 
 @router.get("/summary", response_model=FaultSummaryResponse)
-def fault_summary(project_id: str = Query(default="default")):
+def fault_summary(
+    project_id: str = Query(default="default"),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     """Return aggregate statistics from cache (no recomputation)."""
     try:
         return get_fault_service().get_summary(project_id)
@@ -190,6 +197,7 @@ def fault_summary(project_id: str = Query(default="default")):
 def fault_detail(
     row_id: int = Query(...),
     project_id: str = Query(default="default"),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Return a single fault row with historical context (O(log n) retrieval)."""
     try:
@@ -206,6 +214,7 @@ def fault_detail(
 def quick_stats(
     row_id: int = Query(...),
     project_id: str = Query(default="default"),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
     Returns deterministic stats instantly (no LLM, no RAG) for the dual-engine UI.
@@ -293,7 +302,10 @@ def quick_stats(
 # ── POST /fault/analyze ───────────────────────────────────────────────────────
 
 @router.post("/analyze", response_model=FaultAnalysisV2Response)
-def analyze_fault(body: FaultAnalysisRequest):
+def analyze_fault(
+    body: FaultAnalysisRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     """
     Orchestrated fault analysis: deterministic stats + RAG docs + LLM reasoning.
     Optional 'question' field enables custom row-level Q&A.
@@ -310,12 +322,12 @@ def analyze_fault(body: FaultAnalysisRequest):
             content={
                 "error_type": "SERVICE_UNAVAILABLE",
                 "message": f"Backend services failed to initialize: {exc}. "
-                           "Check that Qdrant and Ollama are running.",
+                           "Check that Qdrant Cloud and API keys are configured.",
             }
         )
 
     try:
-        return orchestrator.analyze_fault(body)
+        return orchestrator.analyze_fault(body, uid=user.uid)
     except LLMConnectionError as exc:
         logger.error("LLM not connected: %s", exc.message)
         return JSONResponse(
@@ -323,7 +335,7 @@ def analyze_fault(body: FaultAnalysisRequest):
             content={
                 "error_type": "LLM_NOT_CONNECTED",
                 "message": exc.message,
-                "action": "Start Ollama with: ollama serve",
+                "action": "Check your API key configuration in Settings.",
             }
         )
     except RAGConnectionError as exc:
@@ -359,7 +371,10 @@ def analyze_fault(body: FaultAnalysisRequest):
 # ── DELETE /fault/reset ───────────────────────────────────────────────────────
 
 @router.delete("/reset")
-def reset_fault_dataset(project_id: str = Query(default="default")):
+def reset_fault_dataset(
+    project_id: str = Query(default="default"),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     """Clear the in-memory dataset and force garbage collection."""
     result = get_fault_service().reset(project_id)
     return result
@@ -368,6 +383,9 @@ def reset_fault_dataset(project_id: str = Query(default="default")):
 # ── GET /fault/metrics ────────────────────────────────────────────────────────
 
 @router.get("/metrics", response_model=FaultMetricsResponse)
-def fault_metrics(project_id: str = Query(default="default")):
+def fault_metrics(
+    project_id: str = Query(default="default"),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     """Return observability metrics: memory, row count, timing."""
     return get_fault_service().get_metrics(project_id)

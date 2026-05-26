@@ -13,9 +13,11 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+from app.auth.firebase_auth import AuthenticatedUser, get_current_user
 
 from app.core.project_exceptions import (
     HallucinatedTagError,
@@ -31,7 +33,6 @@ from app.models.project_models import (
     ProjectQueryResponse,
     ProjectStatus,
 )
-from app.services.project_context_manager import get_project_context_manager
 from app.services.project_ingestion_pipeline import get_ingestion_pipeline
 from app.services.query_orchestrator import get_query_orchestrator
 
@@ -49,7 +50,10 @@ class IngestRequest(BaseModel):
 # ── POST /api/project/ingest ──────────────────────────────────────────────────
 
 @router.post("/ingest", response_model=IngestionResult)
-async def ingest_project(body: IngestRequest):
+async def ingest_project(
+    body: IngestRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     """
     Walk the folder, classify files, and populate StructuredIndex + SemanticIndex.
     Returns IngestionResult with counts and any errors.
@@ -75,14 +79,6 @@ async def ingest_project(body: IngestRequest):
             diag = {"message": raw}
             error_code = "INVALID_FOLDER"
 
-        # Surface IS_DOCKER warning if path not found
-        from app.services.project_context_manager import IS_DOCKER
-        if IS_DOCKER:
-            diag.setdefault("warnings", [])
-            diag["warnings"].append(
-                "Backend is running inside a Docker container. "
-                "Ensure the host path is volume-mounted into the container."
-            )
 
         return JSONResponse(
             status_code=400,
@@ -99,28 +95,37 @@ async def ingest_project(body: IngestRequest):
 # ── GET /api/project/status ───────────────────────────────────────────────────
 
 @router.get("/status", response_model=ProjectStatus)
-def project_status(project_id: str = Query(default="default")):
+def project_status(
+    project_id: str = Query(default="default"),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     """
-    Return full project index status including memory footprint and warnings.
+    Return project index status from SemanticIndex chunk count.
     """
-    ctx = get_project_context_manager()
-    status = ctx.get_status(project_id)
+    from app.indexes.semantic_index import get_semantic_index
+    from app.indexes.structured_index import get_structured_index
 
-    # Enrich with SemanticIndex chunk count
-    try:
-        from app.indexes.semantic_index import get_semantic_index
-        sem = get_semantic_index()
-        status.semantic_chunks = sem.collection_size(project_id)
-    except Exception:
-        pass
+    sem = get_semantic_index()
+    si = get_structured_index(project_id)
+    si_stats = si.stats()
+    chunk_count = sem.collection_size(project_id)
 
-    return status
+    return {
+        "project_id": project_id,
+        "project_loaded": chunk_count > 0,
+        "semantic_chunks": chunk_count,
+        "structured_tags": si_stats.tags,
+        "structured_routines": si_stats.routines,
+    }
 
 
 # ── POST /api/project/query ───────────────────────────────────────────────────
 
 @router.post("/query", response_model=ProjectQueryResponse)
-def project_query(body: ProjectQueryRequest):
+def project_query(
+    body: ProjectQueryRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     """
     Execute the 9-step orchestrated Q&A pipeline.
     412 if project not indexed.
@@ -163,7 +168,10 @@ def project_query(body: ProjectQueryRequest):
 # ── GET /api/project/files ────────────────────────────────────────────────────
 
 @router.get("/files")
-def project_files(project_id: str = Query(default="default")):
+def project_files(
+    project_id: str = Query(default="default"),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     """
     Return a nested file tree of all indexed files for this project.
     Only includes files successfully parsed by reading index metadata.
@@ -244,18 +252,18 @@ def project_files(project_id: str = Query(default="default")):
 # ── GET /api/project/metrics ──────────────────────────────────────────────────
 
 @router.get("/metrics", response_model=ProjectMetrics)
-def project_metrics(project_id: str = Query(default="default")):
+def project_metrics(
+    project_id: str = Query(default="default"),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     """
     Observability endpoint: embedding count, memory usage, ingestion duration.
     """
     from app.indexes.structured_index import get_structured_index
     from app.indexes.semantic_index import get_semantic_index
-    from app.services.project_context_manager import get_project_context_manager
 
     si = get_structured_index(project_id)
     si_stats = si.stats()
-    ctx = get_project_context_manager()
-    status = ctx.get_status(project_id)
 
     sem_count = 0
     try:
@@ -271,51 +279,16 @@ def project_metrics(project_id: str = Query(default="default")):
         structured_index_tags=si_stats.tags,
         structured_index_routines=si_stats.routines,
         memory_usage_mb=si_stats.memory_footprint_mb,
-        ingestion_duration_ms=status.ingestion_duration_ms,
-        last_index_time=status.last_index_time,
     )
-
-# ── GET /api/project/debug-path ───────────────────────────────────────────────
-
-@router.get("/debug-path")
-def debug_path(folder_path: str = Query(..., description="Path to test")):
-    """
-    Quick diagnostic: checks whether the backend process can access a given path.
-    Does NOT ingest or modify any state.
-
-    Returns exists, is_dir, resolved_path, cwd, container_mode, allowed_root.
-    Use this to diagnose Docker mount issues or path typos.
-    """
-    from app.services.project_context_manager import validate_folder_path, IS_DOCKER
-    import os
-    from pathlib import Path
-
-    diag = validate_folder_path(folder_path)
-    resp = {
-        "provided_path": diag.provided_path,
-        "resolved_path": diag.resolved_path,
-        "exists": os.path.exists(diag.resolved_path) if diag.resolved_path != "ERROR" else False,
-        "is_dir": os.path.isdir(diag.resolved_path) if diag.resolved_path != "ERROR" else False,
-        "cwd": diag.cwd,
-        "container_mode": diag.container_mode,
-        "allowed_root": diag.allowed_root,
-        "effective_uid": diag.effective_uid,
-        "ok": diag.ok,
-    }
-    if not diag.ok:
-        resp["error_code"] = diag.error_code
-        resp["message"] = diag.message
-    if IS_DOCKER:
-        resp["docker_warning"] = (
-            "Backend running in Docker. Host paths must be mounted as volumes."
-        )
-    return resp
 
 
 # ── DELETE /api/project/reset ─────────────────────────────────────────────────
 
 @router.delete("/reset")
-def project_reset(project_id: str = Query(default="default")):
+def project_reset(
+    project_id: str = Query(default="default"),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     """Clear all indexes and reset project state."""
     from app.indexes.structured_index import clear_structured_index
     from app.indexes.semantic_index import get_semantic_index
@@ -326,6 +299,4 @@ def project_reset(project_id: str = Query(default="default")):
     except Exception as exc:
         logger.warning("SemanticIndex delete failed: %s", exc)
 
-    get_project_context_manager().reset(project_id)
     return {"status": "reset", "project_id": project_id}
-    

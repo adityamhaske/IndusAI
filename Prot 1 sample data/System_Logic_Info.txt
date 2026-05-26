@@ -1,0 +1,15 @@
+SYSTEM ARCHITECTURE & LOGIC (STATION 4)
+---------------------------------------------------------
+NETWORK: EtherNet/IP
+CONTROLLER: Nexus-PLC v6.0
+SAFETY INTEGRITY LEVEL: SIL 3
+
+OPERATING MODES:
+1. AUTO: Full sequence execution.
+2. MANUAL: Individual I/O forcing allowed for maintenance.
+3. ERROR: All movement inhibited; Requires Manual Reset.
+
+LOGIC SEQUENCE:
+The system follows a 'Detect-Verify-Act' loop.
+If any confirmation (e.g., ZS-402) fails to meet the timestamp window relative to the command (FY-401), 
+the system enters 'Auto_Error' state and records the ALM_3021 code to the Diagnostic Log.

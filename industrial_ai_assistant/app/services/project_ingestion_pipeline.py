@@ -34,7 +34,6 @@ from app.models.project_models import (
     StructuredHit,
 )
 from app.parsers import excel_parser, l5x_parser, pdf_parser, text_parser
-from app.services.project_context_manager import get_project_context_manager
 
 logger = logging.getLogger(__name__)
 
@@ -82,16 +81,19 @@ class ProjectIngestionPipeline:
             return await self._run_ingestion(folder_path, project_id, progress_callback)
 
     async def _run_ingestion(self, folder_path: str, project_id: str, progress_callback=None) -> IngestionResult:
-        ctx = get_project_context_manager()
         t0 = time.perf_counter()
 
-        # Register folder + compute hash (raises ValueError if bad path)
-        ctx.set_project(folder_path, project_id)
-        ctx.mark_indexing(project_id)
+        folder = Path(folder_path)
+        if not folder.is_dir():
+            raise ValueError(f"Not a valid directory: {folder_path}")
+
+        # Compute a lightweight project hash from folder listing
+        file_list = sorted(str(f) for f in folder.rglob("*") if f.is_file())
+        folder_hash = hashlib.sha256("\n".join(file_list).encode()).hexdigest()[:12]
 
         result = IngestionResult(
             project_id=project_id,
-            project_hash=ctx.get_status(project_id).project_hash,
+            project_hash=folder_hash,
             folder=folder_path,
         )
 
@@ -99,7 +101,6 @@ class ProjectIngestionPipeline:
         si = get_structured_index(project_id)
         sem = get_semantic_index()
 
-        folder = Path(folder_path)
         all_files = _collect_files(folder)
         result.files_scanned = len(all_files)
 
