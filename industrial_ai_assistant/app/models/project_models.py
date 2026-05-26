@@ -185,6 +185,7 @@ class ProjectQueryRequest(BaseModel):
     selected_files: list[str] = Field(default_factory=list)
     selected_folders: list[str] = Field(default_factory=list)
     scope_mode: Literal["STRICT", "PREFER", "GLOBAL"] = "GLOBAL"
+    uid: str = Field(default="")
 
 
 class StructuredHit(BaseModel):

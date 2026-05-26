@@ -61,7 +61,7 @@ class SemanticIndex:
 
     # ── Upsert ─────────────────────────────────────────────────────────────────
 
-    def upsert_chunks(self, chunks: list[SemanticChunk], project_id: str) -> int:
+    def upsert_chunks(self, chunks: list[SemanticChunk], project_id: str, embedder=None) -> int:
         """
         Embed and upsert chunks into Qdrant.
         project_id is mandatory — enforced by type signature AND payload.
@@ -74,9 +74,11 @@ class SemanticIndex:
 
         client = self._get_client()
         points = []
+        
+        active_embedder = embedder or self._embedder
 
         for chunk in chunks:
-            embedding = self._embedder.embed_text(chunk.content)
+            embedding = active_embedder.embed_text(chunk.content)
             point_id = _chunk_uuid(chunk.chunk_id)
             payload = {
                 "project_id":    project_id,   # MANDATORY — never omit
@@ -105,12 +107,14 @@ class SemanticIndex:
         top_k: int = 5,
         file_type: Optional[str] = None,
         scope_files: set[str] | None = None,
+        embedder=None,
     ) -> list[ScoredChunk]:
         """Pure cosine vector search, filtered by project_id (mandatory)."""
         from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
 
         client = self._get_client()
-        q_emb = self._embedder.embed_text(query)
+        active_embedder = embedder or self._embedder
+        q_emb = active_embedder.embed_text(query)
 
         must = [FieldCondition(key="project_id", match=MatchValue(value=project_id))]
         if file_type:
@@ -185,6 +189,7 @@ class SemanticIndex:
         top_k: int = 5,
         file_type: Optional[str] = None,
         scope_files: set[str] | None = None,
+        embedder=None,
     ) -> list[ScoredChunk]:
         """
         Reciprocal Rank Fusion of BM25 + vector results.
@@ -196,7 +201,7 @@ class SemanticIndex:
         if project_id not in self._chunk_store or len(self._chunk_store.get(project_id, {})) == 0:
             self.warm_bm25_from_qdrant(project_id)
 
-        vector_hits = self.vector_search(query, project_id, top_k=top_k * 2, file_type=file_type, scope_files=scope_files)
+        vector_hits = self.vector_search(query, project_id, top_k=top_k * 2, file_type=file_type, scope_files=scope_files, embedder=embedder)
         bm25_hits   = self.bm25_search(query, project_id, top_k=top_k * 2, scope_files=scope_files)
 
         rrf: dict[str, float] = {}

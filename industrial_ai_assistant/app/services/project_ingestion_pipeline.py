@@ -68,7 +68,7 @@ async def _get_lock(project_id: str) -> asyncio.Lock:
 class ProjectIngestionPipeline:
     """Orchestrates full project ingestion with concurrency guard."""
 
-    async def ingest(self, folder_path: str, project_id: str, progress_callback=None) -> IngestionResult:
+    async def ingest(self, folder_path: str, project_id: str, progress_callback=None, uid: str = None) -> IngestionResult:
         """
         Entry point. Returns IngestionResult.
         Raises IngestionLockError if already running for this project.
@@ -78,9 +78,9 @@ class ProjectIngestionPipeline:
             raise IngestionLockError(project_id)
 
         async with lock:
-            return await self._run_ingestion(folder_path, project_id, progress_callback)
+            return await self._run_ingestion(folder_path, project_id, progress_callback, uid)
 
-    async def _run_ingestion(self, folder_path: str, project_id: str, progress_callback=None) -> IngestionResult:
+    async def _run_ingestion(self, folder_path: str, project_id: str, progress_callback=None, uid: str = None) -> IngestionResult:
         t0 = time.perf_counter()
 
         folder = Path(folder_path)
@@ -96,6 +96,12 @@ class ProjectIngestionPipeline:
             project_hash=folder_hash,
             folder=folder_path,
         )
+
+        # ── Embedder ─────────────────────────────────────────────────────────
+        embedder = None
+        if uid:
+            from app.embeddings.embedder_factory import get_embedder_for_user
+            embedder = get_embedder_for_user(uid)
 
         # ── Index instances (MUST be initialized before any use) ─────────────
         si = get_structured_index(project_id)
@@ -194,19 +200,19 @@ class ProjectIngestionPipeline:
 
                 if ext in (".l5x",):
                     await asyncio.get_event_loop().run_in_executor(
-                        None, self._ingest_l5x, file_path, project_id, si, sem, result
+                        None, self._ingest_l5x, file_path, project_id, si, sem, result, embedder
                     )
                 elif ext in (".xlsx", ".xls"):
                     await asyncio.get_event_loop().run_in_executor(
-                        None, self._ingest_excel, file_path, project_id, si, sem, result
+                        None, self._ingest_excel, file_path, project_id, si, sem, result, embedder
                     )
                 elif ext == ".pdf":
                     await asyncio.get_event_loop().run_in_executor(
-                        None, self._ingest_pdf, file_path, project_id, sem, result
+                        None, self._ingest_pdf, file_path, project_id, sem, result, embedder
                     )
                 elif ext in (".txt", ".md", ".csv"):
                     await asyncio.get_event_loop().run_in_executor(
-                        None, self._ingest_text, file_path, project_id, sem, result
+                        None, self._ingest_text, file_path, project_id, sem, result, embedder
                     )
                 else:
                     result.files_skipped += 1
@@ -260,7 +266,7 @@ class ProjectIngestionPipeline:
 
     # ── Per-type handlers ──────────────────────────────────────────────────────
 
-    def _ingest_l5x(self, path: Path, project_id: str, si, sem, result: IngestionResult):
+    def _ingest_l5x(self, path: Path, project_id: str, si, sem, result: IngestionResult, embedder=None):
         parsed = l5x_parser.parse(path)
         logger.info("[Ingestion - %s] Parsed L5X '%s': %d tags, %d routines, %d AOIs", project_id, path.name, len(parsed.tags), len(parsed.routines), len(parsed.aois))
         result.warnings.extend(parsed.warnings)
@@ -278,7 +284,7 @@ class ProjectIngestionPipeline:
                     f"{rtn.content_snippet} [Routine: {rtn.name}]",
                     str(path), rtn.name, "l5x", project_id
                 )
-                sem.upsert_chunks([chunk], project_id)
+                sem.upsert_chunks([chunk], project_id, embedder=embedder)
                 result.semantic_chunks_indexed += 1
 
         for aoi in parsed.aois:
@@ -286,7 +292,7 @@ class ProjectIngestionPipeline:
 
         logger.info("[Ingestion - %s] Completed L5X '%s'", project_id, path.name)
 
-    def _ingest_excel(self, path: Path, project_id: str, si, sem, result: IngestionResult):
+    def _ingest_excel(self, path: Path, project_id: str, si, sem, result: IngestionResult, embedder=None):
         parsed = excel_parser.parse(path)
         logger.info("[Ingestion - %s] Parsed Excel '%s': %d IO rows", project_id, path.name, len(parsed.io_rows))
         result.warnings.extend(parsed.warnings)
@@ -297,10 +303,10 @@ class ProjectIngestionPipeline:
             # Semantic chunk: one sentence per IO row for keyword matching
             text = f"Slot {io.slot} Rack {io.rack} Module {io.module}: {io.description} Tag={io.tag_name}"
             chunk = _make_chunk(text, str(path), f"IO Slot {io.slot}", "excel", project_id)
-            sem.upsert_chunks([chunk], project_id)
+            sem.upsert_chunks([chunk], project_id, embedder=embedder)
             result.semantic_chunks_indexed += 1
 
-    def _ingest_pdf(self, path: Path, project_id: str, sem, result: IngestionResult):
+    def _ingest_pdf(self, path: Path, project_id: str, sem, result: IngestionResult, embedder=None):
         parsed = pdf_parser.parse(path)
         logger.info("[Ingestion - %s] Parsed PDF '%s': %d raw chunks generated", project_id, path.name, len(parsed.chunks))
         result.warnings.extend(parsed.warnings)
@@ -309,10 +315,10 @@ class ProjectIngestionPipeline:
             for c in parsed.chunks
         ]
         if chunks:
-            sem.upsert_chunks(chunks, project_id)
+            sem.upsert_chunks(chunks, project_id, embedder=embedder)
             result.semantic_chunks_indexed += len(chunks)
 
-    def _ingest_text(self, path: Path, project_id: str, sem, result: IngestionResult):
+    def _ingest_text(self, path: Path, project_id: str, sem, result: IngestionResult, embedder=None):
         parsed = text_parser.parse(path)
         logger.info("[Ingestion - %s] Parsed Text '%s': %d raw chunks generated", project_id, path.name, len(parsed.chunks))
         result.warnings.extend(parsed.warnings)
@@ -321,7 +327,7 @@ class ProjectIngestionPipeline:
             for c in parsed.chunks
         ]
         if chunks:
-            sem.upsert_chunks(chunks, project_id)
+            sem.upsert_chunks(chunks, project_id, embedder=embedder)
             result.semantic_chunks_indexed += len(chunks)
 
 

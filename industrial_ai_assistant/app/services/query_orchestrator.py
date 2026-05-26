@@ -173,12 +173,18 @@ class QueryOrchestrator:
             # ── Step 4: Semantic retrieval (hybrid) ───────────────────────────────
             if intent.semantic_required:
                 try:
+                    embedder = None
+                    if getattr(request, "uid", None):
+                        from app.embeddings.embedder_factory import get_embedder_for_user
+                        embedder = get_embedder_for_user(request.uid)
+
                     search_scope = effective_scope if scope_mode == "STRICT" else None
                     semantic_hits = sem.hybrid_search(
                         query=request.question,
                         project_id=project_id,
                         top_k=request.top_k * (3 if scope_mode == "PREFER" else 1),
                         scope_files=search_scope,
+                        embedder=embedder,
                     )
                 except Exception as exc:
                     logger.warning("Semantic retrieval failed: %s", exc)

@@ -139,6 +139,7 @@ def _route_project(body: KnowledgeQueryRequest, t_start: float) -> KnowledgeQuer
             selected_files=body.selected_files,
             selected_folders=body.selected_folders,
             scope_mode=body.scope_mode,
+            uid=user.uid,
         )
         result = get_query_orchestrator().query(req)
         total_ms = (time.perf_counter() - t_start) * 1000
