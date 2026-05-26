@@ -9,6 +9,7 @@ from app.api.routes_knowledge import router as knowledge_router
 from app.api.routes_ingest_upload import router as ingest_upload_router
 from app.api import routes_ai
 from app.api import routes_ai_eval
+from app.api.routes_user import router as user_router
 from app.config.settings import settings
 import os
 
@@ -38,6 +39,7 @@ app.include_router(knowledge_router, prefix="/api", tags=["Knowledge"])
 app.include_router(ingest_upload_router, prefix="/api", tags=["Ingest Upload"])
 app.include_router(routes_ai.router, prefix="/api/ai", tags=["AI Gateway"])
 app.include_router(routes_ai_eval.router, prefix="/api/ai", tags=["AI Gateway"])
+app.include_router(user_router, prefix="/api/user", tags=["User Settings"])
 
 
 @app.get("/api/health")
