@@ -204,12 +204,13 @@ const ChatPage = () => {
         } finally {
             setIsLoading(false);
         }
-    }, [appendUserMessage, appendAssistantMessage]);
+    }, [activeProjectId, selectedFiles, selectedFolders, scopeMode, appendUserMessage, appendAssistantMessage]);
 
     // Show welcome message if no history
     const showWelcome = chatHistory.length === 0;
 
     const isProjectLoaded = activeProjectId && activeProjectId !== 'default' && knowledgeStatus?.project_loaded;
+    const isStrictInvalid = scopeMode === 'STRICT' && selectedFiles.length === 0 && selectedFolders.length === 0;
 
     if (!isProjectLoaded) {
         return (

@@ -218,7 +218,47 @@ const LogsPage = () => {
 
                     {/* Show UploadZone only when 'Upload New' is selected or no saved datasets */}
                     {(selectedDataset === '__upload__' || telemetryDatasets.length === 0) && (
-                        <UploadZone onUpload={handleUpload} isLoading={isUploading} uploadInfo={uploadInfo} />
+                        <div className="space-y-6">
+                            <UploadZone onUpload={handleUpload} isLoading={isUploading} uploadInfo={uploadInfo} />
+                            
+                            {/* CSV Preview Table (Empty State Help) */}
+                            {!uploadInfo && telemetryDatasets.length === 0 && (
+                                <div className="mt-8 border border-industrial-200 rounded-xl overflow-hidden bg-white">
+                                    <div className="bg-industrial-50 px-4 py-3 border-b border-industrial-200">
+                                        <h3 className="text-sm font-semibold text-industrial-800">Expected CSV Format</h3>
+                                        <p className="text-xs text-industrial-500 mt-1">Your log file must include exactly these 3 columns with the exact header names.</p>
+                                    </div>
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-sm text-left text-industrial-600">
+                                            <thead className="text-xs text-industrial-700 uppercase bg-industrial-100/50 border-b border-industrial-200">
+                                                <tr>
+                                                    <th className="px-4 py-3 font-semibold">Timestamp</th>
+                                                    <th className="px-4 py-3 font-semibold">FaultCode</th>
+                                                    <th className="px-4 py-3 font-semibold">Description</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-industrial-100 font-mono text-xs">
+                                                <tr className="hover:bg-industrial-50 transition-colors">
+                                                    <td className="px-4 py-2 text-industrial-900">2026-05-24 10:23:45</td>
+                                                    <td className="px-4 py-2 text-primary-600">F_1001</td>
+                                                    <td className="px-4 py-2">Conveyor A Overload</td>
+                                                </tr>
+                                                <tr className="hover:bg-industrial-50 transition-colors">
+                                                    <td className="px-4 py-2 text-industrial-900">2026-05-24 11:05:12</td>
+                                                    <td className="px-4 py-2 text-primary-600">F_304B</td>
+                                                    <td className="px-4 py-2">Pump 3 Low Pressure Warning</td>
+                                                </tr>
+                                                <tr className="hover:bg-industrial-50 transition-colors">
+                                                    <td className="px-4 py-2 text-industrial-900">2026-05-24 13:40:00</td>
+                                                    <td className="px-4 py-2 text-primary-600">E_STOP</td>
+                                                    <td className="px-4 py-2">Emergency Stop Activated Zone 1</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
                     )}
                     {uploadError && (
                         <div className="mt-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
