@@ -8,12 +8,15 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { AuthProvider, useAuth } from './context/AuthContext'
 import Layout from './components/layout/Layout'
 import ChatPage from './pages/ChatPage'
-import { LogsPage } from './pages/LogsPage'
+import LogsPage from './pages/LogsPage'
 import LoginPage from './pages/LoginPage'
 import { ProjectPage } from './pages/ProjectPage';
 import { HistoryPage } from './pages/HistoryPage';
 import SettingsPage from './pages/SettingsPage'
 import { Loader2 } from 'lucide-react'
+import { Toaster } from 'react-hot-toast';
+import { OnboardingWizard } from './components/onboarding/OnboardingWizard';
+import HelpPanel from './components/layout/HelpPanel';
 
 function AuthGate() {
     const { user, loading } = useAuth()
@@ -35,6 +38,8 @@ function AuthGate() {
 
     return (
         <Router>
+            <OnboardingWizard />
+            <HelpPanel />
             <Routes>
                 <Route path="/" element={<Layout title="Chat Assistant"><ChatPage /></Layout>} />
                 <Route path="/chat" element={<Layout title="Chat Assistant"><ChatPage /></Layout>} />
@@ -51,6 +56,7 @@ function AuthGate() {
 function App() {
     return (
         <AuthProvider>
+            <Toaster position="bottom-right" />
             <AuthGate />
         </AuthProvider>
     )

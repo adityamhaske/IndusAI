@@ -10,6 +10,7 @@
  */
 import axios from 'axios';
 import { getIdToken } from './auth';
+import toast from 'react-hot-toast';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || '',
@@ -36,6 +37,8 @@ api.interceptors.response.use(
     if (error.response?.status === 401) {
       // Token expired or invalid — could trigger re-auth here
       console.warn('[apiClient] 401 — user may need to re-authenticate');
+    } else {
+      toast.error(error.response?.data?.detail || error.message || 'Could not connect to backend.', { duration: 4000 });
     }
     return Promise.reject(error);
   }

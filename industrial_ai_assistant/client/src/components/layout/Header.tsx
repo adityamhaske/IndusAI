@@ -4,7 +4,7 @@ import systemApi from '../../services/systemApi';
 import { getProjectStatus } from '../../services/knowledgeApi';
 import { projectApi } from '../../services/projectApi';
 import useAppStore from '../../store/useAppStore';
-import { auth } from '../../services/firebase';
+import { firebaseAuth as auth } from '../../config/firebase';
 
 const Tip = ({ text, children }: { text: string, children: React.ReactNode }) => (
     <div className="relative group">
@@ -99,17 +99,83 @@ const Header = ({ title }: { title: string }) => {
         });
     };
 
-    const currentUser = auth.currentUser;
+    const { user: currentUser, hasApiKey, logOut } = useAuth();
     const userInitials = currentUser?.email ? currentUser.email.substring(0, 2).toUpperCase() : 'U';
 
-    const qdrantOk = health?.services?.qdrant === 'connected';
-    // Let's assume Gemini is ok if the overall status is ok, since the health endpoint covers the main systems.
-    const geminiOk = health?.status === 'ok';
+    const [gracePeriod, setGracePeriod] = useState(true);
+    useEffect(() => {
+        const timer = setTimeout(() => setGracePeriod(false), 3000);
+        return () => clearTimeout(timer);
+    }, []);
+
+    const qdrantConnected = health?.services?.qdrant === 'connected' || health?.vector_store_connected === true;
+    const isHealthLoaded = health !== null;
+    const qdrantState = isHealthLoaded ? (qdrantConnected ? 'ready' : 'failed') : (gracePeriod ? 'loading' : 'failed');
+
+    const geminiConnected = health?.status === 'healthy';
+    const geminiState = !hasApiKey ? 'no_key' : (isHealthLoaded ? (geminiConnected ? 'ready' : 'failed') : (gracePeriod ? 'loading' : 'failed'));
+
     const loaded = knowledgeStatus?.project_loaded;
+
+    const getIndicatorUI = (state: string, loadingLabel: string, readyLabel: string, failedLabel: string, noKeyLabel?: string) => {
+        if (state === 'loading') {
+            return (
+                <div className="hidden md:flex items-center gap-1.5 text-xs text-industrial-400">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    {loadingLabel}
+                </div>
+            );
+        }
+        if (state === 'no_key') {
+            return (
+                <div className="hidden md:flex items-center gap-1.5 text-xs text-industrial-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-industrial-300" />
+                    <Cpu className="w-3 h-3" />
+                    {noKeyLabel}
+                </div>
+            );
+        }
+        const isReady = state === 'ready';
+        return (
+            <div className={`hidden md:flex items-center gap-1.5 text-xs ${isReady ? 'text-industrial-600' : 'text-red-500'}`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${isReady ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />
+                <Database className="w-3 h-3" />
+                {isReady ? readyLabel : failedLabel}
+            </div>
+        );
+    };
+
+    const getLlmIndicatorUI = (state: string) => {
+        if (state === 'loading') {
+            return (
+                <div className="hidden md:flex items-center gap-1.5 text-xs text-industrial-400">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Checking LLM...
+                </div>
+            );
+        }
+        if (state === 'no_key') {
+            return (
+                <div className="hidden md:flex items-center gap-1.5 text-xs text-industrial-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-industrial-300" />
+                    <Cpu className="w-3 h-3" />
+                    No Key Configured
+                </div>
+            );
+        }
+        const isReady = state === 'ready';
+        return (
+            <div className={`hidden md:flex items-center gap-1.5 text-xs ${isReady ? 'text-industrial-600' : 'text-red-500'}`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${isReady ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />
+                <Cpu className="w-3 h-3" />
+                {isReady ? 'Gemini Ready' : 'LLM Offline'}
+            </div>
+        );
+    };
+
 
     const greenBadge = "inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border font-semibold bg-green-50 text-green-700 border-green-200";
     const warnBadge = "inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border font-semibold bg-yellow-50 text-yellow-700 border-yellow-200";
-    const dangerBadge = "inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border font-semibold bg-red-50 text-red-700 border-red-200";
 
     return (
         <>
@@ -151,17 +217,13 @@ const Header = ({ title }: { title: string }) => {
                 </div>
 
                 <div className="flex items-center gap-3 flex-shrink-0">
-                    <div className={`hidden md:flex items-center gap-1.5 text-xs ${geminiOk ? 'text-industrial-600' : 'text-red-500'}`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${geminiOk ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />
-                        <Cpu className="w-3 h-3" />
-                        {geminiOk ? 'Gemini' : 'LLM Offline'}
-                    </div>
+                    <Tip text={geminiState === 'no_key' ? 'No API key configured — go to Settings' : (geminiState === 'failed' ? 'Connection failed' : 'LLM Connected')}>
+                        {getLlmIndicatorUI(geminiState)}
+                    </Tip>
 
-                    <div className={`hidden md:flex items-center gap-1.5 text-xs ${qdrantOk ? 'text-industrial-600' : 'text-red-500'}`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${qdrantOk ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />
-                        <Database className="w-3 h-3" />
-                        {qdrantOk ? 'Qdrant' : 'DB Down'}
-                    </div>
+                    <Tip text={qdrantState === 'failed' ? 'Vector store unreachable' : 'Vector store connected'}>
+                        {getIndicatorUI(qdrantState, 'Checking DB...', 'Qdrant Ready', 'DB Down')}
+                    </Tip>
 
                     <Tip text="Refresh connection">
                         <button
@@ -170,6 +232,15 @@ const Header = ({ title }: { title: string }) => {
                             className="p-1.5 text-industrial-300 hover:text-industrial-600 hover:bg-industrial-100 rounded-full transition-colors disabled:opacity-50"
                         >
                             {reconnecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                        </button>
+                    </Tip>
+
+                    <Tip text="Help & Documentation">
+                        <button
+                            onClick={() => document.dispatchEvent(new CustomEvent('open-help'))}
+                            className="p-1.5 text-industrial-300 hover:text-industrial-600 hover:bg-industrial-100 rounded-full transition-colors font-bold flex items-center justify-center w-7 h-7"
+                        >
+                            ?
                         </button>
                     </Tip>
 
@@ -187,20 +258,31 @@ const Header = ({ title }: { title: string }) => {
                         </button>
 
                         {showUserMenu && (
-                            <div className="absolute right-0 mt-2 w-48 bg-white border border-industrial-200 rounded-lg shadow-lg py-1 z-50">
-                                <div className="px-4 py-2 border-b border-industrial-100">
-                                    <p className="text-sm font-medium text-industrial-900 truncate">
-                                        {currentUser?.email}
-                                    </p>
+                            <>
+                                <div className="fixed inset-0 z-40" onClick={() => setShowUserMenu(false)} />
+                                <div className="absolute right-0 mt-2 w-56 bg-white border border-industrial-200 rounded-xl shadow-lg py-1 z-50">
+                                    <div className="px-4 py-3 border-b border-industrial-100">
+                                        <p className="text-sm font-bold text-industrial-900 truncate">
+                                            {currentUser?.displayName || 'User'}
+                                        </p>
+                                        <p className="text-xs text-industrial-500 truncate mt-0.5">
+                                            {currentUser?.email}
+                                        </p>
+                                    </div>
+                                    <div className="p-1.5">
+                                        <a href="/settings" onClick={() => setShowUserMenu(false)} className="block px-3 py-2 text-sm text-industrial-700 hover:bg-industrial-50 rounded-lg">
+                                            Settings
+                                        </a>
+                                        <button 
+                                            onClick={logOut}
+                                            className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-lg flex items-center gap-2 mt-1"
+                                        >
+                                            <LogOut className="w-4 h-4" />
+                                            Sign Out
+                                        </button>
+                                    </div>
                                 </div>
-                                <button 
-                                    onClick={handleSignOut}
-                                    className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2"
-                                >
-                                    <LogOut className="w-4 h-4" />
-                                    Sign Out
-                                </button>
-                            </div>
+                            </>
                         )}
                     </div>
                 </div>

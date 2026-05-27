@@ -18,20 +18,6 @@ async function authFetch(url, options = {}) {
 }
 
 
-import React from 'react';
-import useAppStore from '../store/useAppStore';
-import { getIdToken } from '../services/auth';
-
-/**
- * Authenticated fetch wrapper — adds Bearer token to every request.
- * Drop-in replacement for window.fetch in page components.
- */
-async function authFetch(url, options = {}) {
-    const token = await getIdToken();
-    const headers = { ...(options.headers || {}) };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-    return fetch(url, { ...options, headers });
-}
 
 export const HistoryPage = () => {
     const [tab, setTab] = useState('all');

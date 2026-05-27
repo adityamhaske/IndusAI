@@ -11,9 +11,7 @@ export const projectApi = {
     for (const file of Array.from(files)) {
       form.append('files', file, (file as any).webkitRelativePath || file.name);
     }
-    const res = await api.post('/api/project/ingest-upload', form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
+    const res = await api.post('/api/project/ingest-upload', form);
     return res.data;
   },
 

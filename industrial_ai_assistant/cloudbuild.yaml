@@ -1,0 +1,48 @@
+steps:
+  # Backend — build and deploy to Cloud Run
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 
+           'gcr.io/indus-ai-cloud-101/indusai-backend', 
+           '.']
+  
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args: ['run', 'deploy', 'indusai-backend',
+           '--image', 
+           'gcr.io/indus-ai-cloud-101/indusai-backend',
+           '--platform', 'managed',
+           '--region', 'us-central1',
+           '--allow-unauthenticated',
+           '--memory', '512Mi',
+           '--cpu', '1',
+           '--max-instances', '3',
+           '--timeout', '300']
+
+  # Frontend — npm install + build + deploy
+  - name: 'node:20'
+    dir: 'client'
+    entrypoint: 'npm'
+    args: ['install', '--legacy-peer-deps']
+
+  - name: 'node:20'
+    dir: 'client'
+    entrypoint: 'npm'
+    args: ['run', 'build']
+    env:
+      - 'VITE_API_URL=$_VITE_API_URL'
+
+  # Install Firebase CLI in Cloud Build
+  - name: 'node:20'
+    entrypoint: 'npm'
+    args: ['install', '-g', 'firebase-tools']
+
+  # Deploy to Firebase Hosting
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'firebase'
+    args: ['deploy', '--only', 'hosting',
+           '--project', 'indus-ai-cloud-101']
+
+substitutions:
+  _VITE_API_URL: 'https://indusai-backend-wtalsahf3a-uc.a.run.app'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

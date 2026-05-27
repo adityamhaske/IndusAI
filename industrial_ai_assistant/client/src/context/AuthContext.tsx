@@ -7,31 +7,42 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { type User } from 'firebase/auth';
 import { onAuthChange, signInWithGoogle, signOut, getIdToken } from '../services/auth';
+import { useUserSettings } from '../hooks/useUserSettings';
 
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
+  hasApiKey: boolean;
   signIn: () => Promise<void>;
   logOut: () => Promise<void>;
   getToken: () => Promise<string | null>;
+  refreshSettings: () => Promise<any>;
 }
 
 const AuthContext = createContext<AuthContextValue>({
   user: null,
   loading: true,
+  hasApiKey: false,
   signIn: async () => {},
   logOut: async () => {},
   getToken: async () => null,
+  refreshSettings: async () => {},
 });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loadingAuth, setLoadingAuth] = useState(true);
+  
+  const { settings, loading: loadingSettings, refreshSettings } = useUserSettings(user?.uid);
+  const hasApiKey = !!settings?.gemini_api_key || !!settings?.has_api_key;
+  
+  // Overall loading is true if auth is loading, or if we have a user but settings are still loading
+  const loading = loadingAuth || (!!user && loadingSettings);
 
   useEffect(() => {
     const unsub = onAuthChange((u) => {
       setUser(u);
-      setLoading(false);
+      setLoadingAuth(false);
     });
     return unsub;
   }, []);
@@ -49,7 +60,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, signIn, logOut, getToken }}>
+    <AuthContext.Provider value={{ user, loading, hasApiKey, signIn, logOut, getToken, refreshSettings }}>
       {children}
     </AuthContext.Provider>
   );

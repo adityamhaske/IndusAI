@@ -58,6 +58,28 @@ const FolderTreeNode = ({ node, level = 0 }) => {
     );
 };
 
+const StatBox = ({ label, value, icon: Icon }: any) => (
+    <div className="bg-white p-4 rounded-xl border border-industrial-200 shadow-sm flex items-center gap-3">
+        <div className="p-2.5 bg-primary-50 text-primary-600 rounded-lg">
+            <Icon className="w-5 h-5" />
+        </div>
+        <div>
+            <div className="text-xs font-semibold text-industrial-500 uppercase tracking-wider">{label}</div>
+            <div className="text-lg font-bold text-industrial-900 mt-0.5">{value}</div>
+        </div>
+    </div>
+);
+
+const statusColor = (state: string) => {
+    switch (state) {
+        case 'READY': return 'bg-green-50 border-green-200 text-green-700';
+        case 'FAILED': return 'bg-red-50 border-red-200 text-red-700';
+        case 'STALE': return 'bg-yellow-50 border-yellow-200 text-yellow-700';
+        case 'INDEXING': return 'bg-blue-50 border-blue-200 text-blue-700';
+        default: return 'bg-industrial-50 border-industrial-200 text-industrial-600';
+    }
+};
+
 
 // ── Project Page ──────────────────────────────────────────────────────────────
 export const ProjectPage = () => {
@@ -405,9 +427,19 @@ export const ProjectPage = () => {
                         )}
 
                         {error && (
-                            <div className="flex items-start gap-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl p-3">
-                                <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-                                <div><span className="font-medium">Ingestion failed:</span> <br />{error}</div>
+                            <div className="flex flex-col gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
+                                <div className="flex items-start gap-2 text-sm text-red-600">
+                                    <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                                    <div><span className="font-medium">Ingestion failed:</span> <br />{error}</div>
+                                </div>
+                                <div className="flex justify-end">
+                                    <button
+                                        onClick={() => (useUpload === 'path' || useUpload === false) ? startPathIngestion() : startUploadIngestion()}
+                                        className="px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-100 hover:bg-red-200 rounded-lg transition-colors flex items-center gap-1.5"
+                                    >
+                                        <RefreshCw className="w-3 h-3" /> Retry
+                                    </button>
+                                </div>
                             </div>
                         )}
 

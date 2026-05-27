@@ -48,7 +48,11 @@ class SemanticIndex:
         if self._client is None:
             from qdrant_client import QdrantClient
             from qdrant_client.models import Distance, VectorParams
-            self._client = QdrantClient(host=self._host, port=self._port)
+            from app.config.settings import settings
+            if settings.QDRANT_URL:
+                self._client = QdrantClient(url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY)
+            else:
+                self._client = QdrantClient(host=self._host, port=self._port)
             # Ensure collection exists
             existing = [c.name for c in self._client.get_collections().collections]
             if _QDRANT_COLLECTION not in existing:

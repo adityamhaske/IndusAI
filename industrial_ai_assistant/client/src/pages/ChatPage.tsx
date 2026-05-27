@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useCallback } from 'react';
-import { Loader2, Zap, Database, AlertTriangle } from 'lucide-react';
+import { Loader2, Zap, Database, AlertTriangle, FolderOpen } from 'lucide-react';
 import { queryKnowledge, getProjectStatus } from '../services/knowledgeApi';
 import useAppStore from '../store/useAppStore';
 import AnswerCard from '../components/chat/AnswerCard';
@@ -209,7 +209,24 @@ const ChatPage = () => {
     // Show welcome message if no history
     const showWelcome = chatHistory.length === 0;
 
-    const isStrictInvalid = scopeMode === 'STRICT' && (selectedFiles.length + selectedFolders.length) === 0;
+    const isProjectLoaded = activeProjectId && activeProjectId !== 'default' && knowledgeStatus?.project_loaded;
+
+    if (!isProjectLoaded) {
+        return (
+            <div className="flex flex-col h-full bg-industrial-50 items-center justify-center p-8 text-center animate-fade-in">
+                <div className="w-20 h-20 bg-white border border-industrial-200 text-industrial-400 rounded-2xl shadow-sm flex items-center justify-center mb-6">
+                    <Database className="w-10 h-10" />
+                </div>
+                <h2 className="text-2xl font-bold text-industrial-900 mb-3">Select a Project to Begin</h2>
+                <p className="text-industrial-500 max-w-md mb-8 leading-relaxed">
+                    To start asking questions about your PLC logic, P&IDs, and fault logs, you need to load an active project workspace.
+                </p>
+                <Link to="/project" className="bg-industrial-900 hover:bg-black text-white font-semibold py-3 px-6 rounded-xl transition-all shadow-sm">
+                    Go to Projects
+                </Link>
+            </div>
+        );
+    }
 
     return (
         <div className="flex flex-row h-full overflow-hidden bg-industrial-50">
