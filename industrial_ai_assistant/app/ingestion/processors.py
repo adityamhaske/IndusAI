@@ -59,7 +59,14 @@ class PDFProcessor:
         )
         response = model.generate_content([uploaded_file, prompt])
         
-        raw_text = response.text.strip()
+        try:
+            raw_text = response.text.strip()
+        except Exception as access_err:
+            if response.candidates and response.candidates[0].content.parts:
+                raw_text = "".join(part.text for part in response.candidates[0].content.parts if hasattr(part, 'text')).strip()
+            else:
+                finish_reason = response.candidates[0].finish_reason.name if response.candidates else "UNKNOWN"
+                raise ValueError(f"Gemini returned no text content for PDF (finish_reason: {finish_reason}). Error: {access_err}")
         if raw_text.startswith("```json"):
             raw_text = raw_text[7:]
         if raw_text.endswith("```"):

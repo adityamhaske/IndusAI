@@ -34,7 +34,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loadingAuth, setLoadingAuth] = useState(true);
   
   const { settings, loading: loadingSettings, refreshSettings } = useUserSettings(user?.uid);
-  const hasApiKey = !!settings?.gemini_api_key || !!settings?.has_api_key;
+  const hasApiKey = !!settings?.gemini_api_key || !!settings?.has_api_key || !!settings?.has_llm_key;
   
   // Overall loading is true if auth is loading, or if we have a user but settings are still loading
   const loading = loadingAuth || (!!user && loadingSettings);

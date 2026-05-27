@@ -2,6 +2,14 @@ import { useState, useEffect } from 'react';
 import api from '../services/apiClient';
 
 export interface UserSettings {
+  llm_provider?: string | null;
+  llm_model?: string | null;
+  embedding_provider?: string | null;
+  ollama_url?: string | null;
+  has_llm_key?: boolean;
+  has_embedding_key?: boolean;
+  llm_key_preview?: string | null;
+  embedding_key_preview?: string | null;
   gemini_api_key?: string;
   has_api_key?: boolean;
 }

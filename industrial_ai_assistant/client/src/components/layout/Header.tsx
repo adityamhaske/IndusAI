@@ -5,6 +5,9 @@ import { getProjectStatus } from '../../services/knowledgeApi';
 import { projectApi } from '../../services/projectApi';
 import useAppStore from '../../store/useAppStore';
 import { firebaseAuth as auth } from '../../config/firebase';
+import { useAuth } from '../../context/AuthContext';
+
+import api from '../../services/apiClient';
 
 const Tip = ({ text, children }: { text: string, children: React.ReactNode }) => (
     <div className="relative group">
@@ -31,8 +34,8 @@ const Header = ({ title }: { title: string }) => {
 
     const fetchProjects = useCallback(async () => {
         try {
-            const r = await fetch('/api/projects');
-            const data = await r.json();
+            const res = await api.get('/api/projects');
+            const data = res.data;
             if (Array.isArray(data) && data.length > 0) setProjects(data);
         } catch { /* silent */ }
     }, []);
@@ -41,7 +44,7 @@ const Header = ({ title }: { title: string }) => {
         try {
             const pid = useAppStore.getState().activeProjectId || 'default';
             const [h, p] = await Promise.allSettled([
-                fetch('/api/health').then(r => r.json()),
+                api.get('/api/health').then(r => r.data),
                 getProjectStatus(pid),
             ]);
             if (h.status === 'fulfilled') setHealth(h.value);

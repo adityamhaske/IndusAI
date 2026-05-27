@@ -60,7 +60,7 @@ def test_ai_connection(
 
     t0 = time.perf_counter()
     try:
-        req = AIRequest(prompt="Reply with exactly: OK", max_tokens=5, response_format="text")
+        req = AIRequest(prompt="Reply with exactly: OK", max_tokens=1000, response_format="text")
         res = provider.generate(req)
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
 

@@ -100,22 +100,51 @@ def project_status(
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
-    Return project index status from SemanticIndex chunk count.
+    Return project index status from database + index stats.
     """
     from app.indexes.semantic_index import get_semantic_index
     from app.indexes.structured_index import get_structured_index
+    from app.config.dependency_injection import get_container
+
+    ps = get_container()._project_service
+    project = ps.get_project(user.uid, project_id)
 
     sem = get_semantic_index()
     si = get_structured_index(project_id)
     si_stats = si.stats()
-    chunk_count = sem.collection_size(project_id)
+
+    chunk_count = 0
+    try:
+        chunk_count = sem.collection_size(project_id)
+    except Exception:
+        pass
+
+    state = "UNLOADED"
+    if project:
+        state = project.get("index_status", "UNLOADED")
+    elif chunk_count > 0:
+        state = "READY"
+
+    # Map database telemetry file if registered
+    datasets = ps.get_telemetry_datasets(user.uid, project_id)
+    io_rows = sum(d.get("row_count", 0) for d in datasets) if datasets else 0
+
+    files = ps.get_project_files(user.uid, project_id)
 
     return {
         "project_id": project_id,
         "project_loaded": chunk_count > 0,
+        "folder": project.get("root_directory", "") if project else "",
+        "project_hash": project.get("index_version", "") if project else "",
+        "index_state": state,
+        "files_indexed": len(files),
+        "tags_indexed": si_stats.tags,
+        "routines_indexed": si_stats.routines,
+        "io_rows_indexed": io_rows,
         "semantic_chunks": chunk_count,
-        "structured_tags": si_stats.tags,
-        "structured_routines": si_stats.routines,
+        "memory_footprint_mb": si_stats.memory_footprint_mb,
+        "errors": [],
+        "warnings": [],
     }
 
 

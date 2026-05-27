@@ -41,13 +41,14 @@ async def _run_ingestion_task(job_id: str, project_id: str, uid: str, uploaded_b
             from app.config.dependency_injection import get_container
             ps = get_container()._project_service
             ps.upsert_project(
+                uid=uid,
                 project_id=project_id,
                 name=project_id.replace("_", " ").replace("-", " ").title(),
-                root_directory="firebase_storage",
                 index_status="INDEXING",
             )
             for fname, fpath in csv_files:
                 ps.upsert_telemetry_dataset(
+                    uid=uid,
                     project_id=project_id,
                     file_name=fname,
                     file_path=fpath,
@@ -64,7 +65,9 @@ async def _run_ingestion_task(job_id: str, project_id: str, uid: str, uploaded_b
             from app.config.dependency_injection import get_container
             ps = get_container()._project_service
             ps.update_index_status(
-                project_id, "READY",
+                uid=uid,
+                project_id=project_id,
+                status="READY",
                 last_indexed_at=datetime.utcnow(),
                 index_version=result.project_hash,
             )
@@ -86,7 +89,7 @@ async def _run_ingestion_task(job_id: str, project_id: str, uid: str, uploaded_b
         }, merge=True)
         try:
             from app.config.dependency_injection import get_container
-            get_container()._project_service.update_index_status(project_id, "OUTDATED")
+            get_container()._project_service.update_index_status(uid, project_id, "OUTDATED")
         except Exception:
             pass
 

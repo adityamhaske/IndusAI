@@ -21,7 +21,7 @@ export const OnboardingWizard = () => {
         if (!apiKey.trim()) return;
         setIsSaving(true);
         try {
-            await userApi.saveSettings({ llm_api_key: apiKey.trim() });
+            await userApi.saveSettings({ llm_provider: 'gemini', llm_api_key: apiKey.trim() });
             await refreshSettings();
             toast.success('API Key saved successfully!');
             setStep(3);

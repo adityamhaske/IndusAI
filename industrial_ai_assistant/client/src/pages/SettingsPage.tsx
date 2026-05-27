@@ -20,7 +20,7 @@ const PROVIDERS = [
 ];
 
 export default function SettingsPage() {
-  const { user } = useAuth();
+  const { user, refreshSettings } = useAuth();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -70,6 +70,11 @@ export default function SettingsPage() {
       setHasExistingKey(result.has_llm_key);
       setKeyPreview(result.llm_key_preview || '');
       setApiKey(''); // Clear the input after save
+      try {
+        await refreshSettings();
+      } catch (refreshErr) {
+        console.error("Failed to refresh global settings", refreshErr);
+      }
       setMessage({ type: 'success', text: 'Settings saved successfully.' });
     } catch (err: any) {
       setMessage({ type: 'error', text: err.response?.data?.detail || err.message || 'Save failed' });

@@ -98,16 +98,26 @@ class UserSettingsService:
         if embedding_provider and embedding_provider not in SUPPORTED_EMBEDDING_PROVIDERS:
             raise ValueError(f"Unsupported embedding provider: {embedding_provider}. Choose from {SUPPORTED_EMBEDDING_PROVIDERS}")
 
+        # Fetch existing document to check current provider
+        doc = self._db.get_doc(uid, "profile", "settings") or {}
+
         # Build update payload — only set fields that were provided
         update: dict = {}
         if llm_provider is not None:
             update["llm_provider"] = llm_provider
+        elif llm_api_key is not None and not doc.get("llm_provider"):
+            update["llm_provider"] = "gemini"
+
         if llm_model is not None:
             update["llm_model"] = llm_model
         if llm_api_key is not None:
             update["llm_api_key_enc"] = encrypt(llm_api_key)
+
         if embedding_provider is not None:
             update["embedding_provider"] = embedding_provider
+        elif embedding_api_key is not None and not doc.get("embedding_provider"):
+            update["embedding_provider"] = "gemini"
+
         if embedding_api_key is not None:
             update["embedding_api_key_enc"] = encrypt(embedding_api_key)
         if ollama_url is not None:

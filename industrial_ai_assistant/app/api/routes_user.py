@@ -76,7 +76,7 @@ async def test_connection(user: AuthenticatedUser = Depends(get_current_user)):
         request = AIRequest(
             prompt="Reply with exactly: OK",
             response_format="text",
-            max_tokens=10,
+            max_tokens=1000,
             temperature=0.0,
         )
         response = provider.generate(request)

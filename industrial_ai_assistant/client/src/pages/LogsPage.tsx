@@ -9,6 +9,8 @@ import FaultSummaryCard from '../components/dashboard/FaultSummaryCard';
 import VirtualizedFaultTable from '../components/dashboard/VirtualizedFaultTable';
 import SelectedFaultPanel from '../components/dashboard/SelectedFaultPanel';
 
+import api from '../services/apiClient';
+
 const LogsPage = () => {
     const activeProjectId = useAppStore(s => s.activeProjectId);
     const knowledgeStatus = useAppStore(s => s.knowledgeStatus);
@@ -31,8 +33,8 @@ const LogsPage = () => {
     const fetchTelemetry = useCallback(async () => {
         try {
             const pid = activeProjectId || 'default';
-            const r = await fetch(`/api/projects/${pid}/telemetry`);
-            const data = await r.json();
+            const res = await api.get(`/api/projects/${pid}/telemetry`);
+            const data = res.data;
             if (Array.isArray(data)) setTelemetryDatasets(data);
         } catch { /* silent */ }
     }, [activeProjectId]);
@@ -46,22 +48,13 @@ const LogsPage = () => {
         setUploadError(null);
         try {
             // Load existing dataset by its stored file_path
-            const r = await fetch('/api/fault/load-dataset', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ file_path: val }),
-            });
-            if (r.ok) {
-                const result = await r.json();
-                setUploadInfo(result);
-                const s = await faultApi.summary();
-                setSummary(s);
-            } else {
-                const err = await r.json();
-                setUploadError(err.message || 'Failed to load dataset');
-            }
-        } catch (e) {
-            setUploadError(`Load failed: ${e.message}`);
+            const res = await api.post('/api/fault/load-dataset', { file_path: val });
+            const result = res.data;
+            setUploadInfo(result);
+            const s = await faultApi.summary();
+            setSummary(s);
+        } catch (e: any) {
+            setUploadError(e.response?.data?.detail || e.message || 'Failed to load dataset');
         } finally {
             setLoadingDataset(false);
         }
