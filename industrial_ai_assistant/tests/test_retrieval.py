@@ -9,13 +9,13 @@ import pytest
 class _MockEmbedder:
     """Returns a fixed-dimension zero vector for any text."""
     def embed_text(self, text: str):
-        return [0.0] * 384
+        return [0.0] * 768
 
 
 def test_mock_embedder_returns_vector():
     embedder = _MockEmbedder()
     vec = embedder.embed_text("hello world")
-    assert len(vec) == 384
+    assert len(vec) == 768
     assert all(v == 0.0 for v in vec)
 
 

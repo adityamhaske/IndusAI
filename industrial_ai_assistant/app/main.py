@@ -10,6 +10,7 @@ from app.api.routes_ingest_upload import router as ingest_upload_router
 from app.api import routes_ai
 from app.api import routes_ai_eval
 from app.api.routes_user import router as user_router
+from app.api.routes_health import router as health_router
 from app.config.settings import settings
 import os
 
@@ -30,6 +31,7 @@ app.add_middleware(
 )
 
 # Include Routers
+app.include_router(health_router, prefix="/api")
 app.include_router(routes_history.router, prefix="/api", tags=["History"])
 app.include_router(routes_project.router, prefix="/api", tags=["Projects"])
 app.include_router(fault_router, prefix="/api", tags=["PLC Faults"])
@@ -41,10 +43,6 @@ app.include_router(routes_ai.router, prefix="/api/ai", tags=["AI Gateway"])
 app.include_router(routes_ai_eval.router, prefix="/api/ai", tags=["AI Gateway"])
 app.include_router(user_router, prefix="/api/user", tags=["User Settings"])
 
-
-@app.get("/api/health")
-def health_check():
-    return {"status": "ok", "service": "Industrial AI Assistant"}
 
 
 # Serve Frontend (React build output only)

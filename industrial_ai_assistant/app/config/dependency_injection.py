@@ -90,7 +90,7 @@ class Container:
         # 6. Ingestion processors
         self._chunker = SemanticChunker()
         self._processors = {
-            "pdf": PDFProcessor(self._chunker),
+            "pdf": PDFProcessor(self._chunker, api_key=""),
             "l5x": L5XProcessor(self._chunker),
             "xlsx": ExcelProcessor(self._chunker),
         }

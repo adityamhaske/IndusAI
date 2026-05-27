@@ -20,7 +20,7 @@ from app.models.project_models import ScoredChunk, SemanticChunk
 logger = logging.getLogger(__name__)
 
 _QDRANT_COLLECTION = "project_knowledge"
-_VECTOR_DIM = 384   # all-MiniLM-L6-v2
+_VECTOR_DIM = 768   # Gemini embeddings
 
 
 class SemanticIndex:

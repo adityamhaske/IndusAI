@@ -1,0 +1,625 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.8, pytest-9.0.2, pluggy-1.6.0
+rootdir: /Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant
+plugins: anyio-4.12.1, opik-1.10.1, langsmith-0.3.45, Faker-40.1.2, typeguard-4.4.4
+collected 17 items
+
+tests/test_fault_rag_integration.py ..FF.FF..                            [ 52%]
+tests/test_phase11_functional.py FF.....F                                [100%]
+
+=================================== FAILURES ===================================
+____________________________ test_llm_output_parsed ____________________________
+
+    def test_llm_output_parsed():
+        svc = _make_loaded_service()
+        orch = FaultAnalysisOrchestrator(
+            llm=_GoodMockLLM(),
+            rag_service=_mock_rag(),
+            validator=FaultResponseValidator(),
+            fault_service=svc,
+        )
+        result = orch.analyze_fault(FaultAnalysisRequest(row_id=99, project_id="default"))
+>       assert result.analysis_version == "v3.0"
+E       AssertionError: assert 'v4.0' == 'v3.0'
+E         
+E         - v3.0
+E         ?  ^
+E         + v4.0
+E         ?  ^
+
+tests/test_fault_rag_integration.py:155: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:230 Memory layer failed (non-fatal): 403 Cloud Firestore API has not been used in project antigravity-sandbox-amh before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry. [reason: "SERVICE_DISABLED"
+domain: "googleapis.com"
+metadata {
+  key: "service"
+  value: "firestore.googleapis.com"
+}
+metadata {
+  key: "serviceTitle"
+  value: "Cloud Firestore API"
+}
+metadata {
+  key: "containerInfo"
+  value: "antigravity-sandbox-amh"
+}
+metadata {
+  key: "consumer"
+  value: "projects/antigravity-sandbox-amh"
+}
+metadata {
+  key: "activationUrl"
+  value: "https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh"
+}
+, locale: "en-US"
+message: "Cloud Firestore API has not been used in project antigravity-sandbox-amh before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry."
+, links {
+  description: "Google developers console API activation"
+  url: "https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh"
+}
+]
+WARNING  app.services.rag_service:rag_service.py:107 Hybrid search failed, falling back to legacy retriever: 403 Request had insufficient authentication scopes. [reason: "ACCESS_TOKEN_SCOPE_INSUFFICIENT"
+metadata {
+  key: "service"
+  value: "generativelanguage.googleapis.com"
+}
+metadata {
+  key: "method"
+  value: "google.ai.generativelanguage.v1beta.GenerativeService.EmbedContent"
+}
+]
+WARNING  app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:458 LLM attempt 1/2 validation failed: 4 validation errors for StructuredLLMOutput
+fault_summary
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+root_cause
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+trigger_mechanism
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+resolution_steps
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+WARNING  app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:458 LLM attempt 2/2 validation failed: 4 validation errors for StructuredLLMOutput
+fault_summary
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+root_cause
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+trigger_mechanism
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+resolution_steps
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+ERROR    app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:467 LLM failed to return valid JSON. Degrading to raw text. Last Error: 4 validation errors for StructuredLLMOutput
+fault_summary
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+root_cause
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+trigger_mechanism
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+resolution_steps
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+ERROR    app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:341 JSON parsing failed entirely for row 99. Degrading to raw text.
+________________________ test_hallucinated_tags_removed ________________________
+
+    def test_hallucinated_tags_removed():
+        svc = _make_loaded_service()
+        known_tags = ["GOOD_TAG_A", "GOOD_TAG_B"]
+    
+        class ValidatorWithKnownTags(FaultResponseValidator):
+            def validate(self, output, doc_sources, known_tags=None, is_retry=False):
+                return super().validate(output, doc_sources, known_tags=["GOOD_TAG_A", "GOOD_TAG_B"], is_retry=is_retry)
+    
+        orch = FaultAnalysisOrchestrator(
+            llm=_HallucinationLLM(),
+            rag_service=_mock_rag(),
+            validator=ValidatorWithKnownTags(),
+            fault_service=svc,
+        )
+        result = orch.analyze_fault(FaultAnalysisRequest(row_id=99, project_id="default"))
+        # Get tags directly since they are now processed in hallucinated_tags_removed but there's no result.related_plc_tags array natively exposed top-level in v3
+>       assert len(result.hallucinated_tags_removed) == 2  # FAKE_TAG_XYZ, INVENTED_DB99_VAR
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError: assert 0 == 2
+E        +  where 0 = len([])
+E        +    where [] = FaultAnalysisV2Response(analysis_version='v4.0', dataset_hash='d7439bee24773bcbfa2d0a97947ee36227b10d1022b1a55847e9289...nse was not valid JSON. Returned raw text instead.'], llm_latency_ms=2.7, rag_latency_ms=135.9, total_latency_ms=292.5).hallucinated_tags_removed
+
+tests/test_fault_rag_integration.py:179: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:230 Memory layer failed (non-fatal): 403 Cloud Firestore API has not been used in project antigravity-sandbox-amh before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry. [reason: "SERVICE_DISABLED"
+domain: "googleapis.com"
+metadata {
+  key: "service"
+  value: "firestore.googleapis.com"
+}
+metadata {
+  key: "serviceTitle"
+  value: "Cloud Firestore API"
+}
+metadata {
+  key: "containerInfo"
+  value: "antigravity-sandbox-amh"
+}
+metadata {
+  key: "consumer"
+  value: "projects/antigravity-sandbox-amh"
+}
+metadata {
+  key: "activationUrl"
+  value: "https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh"
+}
+, locale: "en-US"
+message: "Cloud Firestore API has not been used in project antigravity-sandbox-amh before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry."
+, links {
+  description: "Google developers console API activation"
+  url: "https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh"
+}
+]
+WARNING  app.services.rag_service:rag_service.py:107 Hybrid search failed, falling back to legacy retriever: 403 Request had insufficient authentication scopes. [reason: "ACCESS_TOKEN_SCOPE_INSUFFICIENT"
+metadata {
+  key: "service"
+  value: "generativelanguage.googleapis.com"
+}
+metadata {
+  key: "method"
+  value: "google.ai.generativelanguage.v1beta.GenerativeService.EmbedContent"
+}
+]
+WARNING  app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:458 LLM attempt 1/2 validation failed: 4 validation errors for StructuredLLMOutput
+fault_summary
+  Field required [type=missing, input_value={'diagnosis': 'Fault anal...', 'confidence': 'HIGH'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+root_cause
+  Field required [type=missing, input_value={'diagnosis': 'Fault anal...', 'confidence': 'HIGH'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+trigger_mechanism
+  Field required [type=missing, input_value={'diagnosis': 'Fault anal...', 'confidence': 'HIGH'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+resolution_steps
+  Field required [type=missing, input_value={'diagnosis': 'Fault anal...', 'confidence': 'HIGH'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+WARNING  app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:458 LLM attempt 2/2 validation failed: 4 validation errors for StructuredLLMOutput
+fault_summary
+  Field required [type=missing, input_value={'diagnosis': 'Fault anal...', 'confidence': 'HIGH'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+root_cause
+  Field required [type=missing, input_value={'diagnosis': 'Fault anal...', 'confidence': 'HIGH'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+trigger_mechanism
+  Field required [type=missing, input_value={'diagnosis': 'Fault anal...', 'confidence': 'HIGH'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+resolution_steps
+  Field required [type=missing, input_value={'diagnosis': 'Fault anal...', 'confidence': 'HIGH'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+ERROR    app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:467 LLM failed to return valid JSON. Degrading to raw text. Last Error: 4 validation errors for StructuredLLMOutput
+fault_summary
+  Field required [type=missing, input_value={'diagnosis': 'Fault anal...', 'confidence': 'HIGH'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+root_cause
+  Field required [type=missing, input_value={'diagnosis': 'Fault anal...', 'confidence': 'HIGH'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+trigger_mechanism
+  Field required [type=missing, input_value={'diagnosis': 'Fault anal...', 'confidence': 'HIGH'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+resolution_steps
+  Field required [type=missing, input_value={'diagnosis': 'Fault anal...', 'confidence': 'HIGH'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+ERROR    app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:341 JSON parsing failed entirely for row 99. Degrading to raw text.
+________________________ test_llm_timeout_uses_fallback ________________________
+
+    def test_llm_timeout_uses_fallback():
+        """
+        When LLM raises a RuntimeError (e.g. timeout), the orchestrator now raises
+        LLMResponseParseError instead of silently falling back.
+        No silent fallback is allowed per the design spec.
+        """
+        svc = _make_loaded_service()
+    
+        # Inject a mock health service that reports LLM as ok so the preflight passes,
+        # letting us test the LLM generate() failure path specifically.
+        class _AlwaysOkHealth:
+            def check_llm(self, **kw):
+                return {"ok": True, "provider": "mock", "url": "mock://", "reason": None}
+    
+        orch = FaultAnalysisOrchestrator(
+            llm=_TimeoutMockLLM(),
+            rag_service=_mock_rag(),
+            validator=FaultResponseValidator(),
+            fault_service=svc,
+            health_service=_AlwaysOkHealth(),
+        )
+    
+        result = orch.analyze_fault(FaultAnalysisRequest(row_id=99, project_id="default"))
+>       assert "[STRUCTURED PARSE FAILED" in result.diagnosis
+                                             ^^^^^^^^^^^^^^^^
+
+tests/test_fault_rag_integration.py:226: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = FaultAnalysisV2Response(analysis_version='v4.0', dataset_hash='d7439bee24773bcbfa2d0a97947ee36227b10d1022b1a55847e9289...nse was not valid JSON. Returned raw text instead.'], llm_latency_ms=2.1, rag_latency_ms=135.9, total_latency_ms=269.7)
+item = 'diagnosis'
+
+    def __getattr__(self, item: str) -> Any:
+        private_attributes = object.__getattribute__(self, '__private_attributes__')
+        if item in private_attributes:
+            attribute = private_attributes[item]
+            if hasattr(attribute, '__get__'):
+                return attribute.__get__(self, type(self))  # type: ignore
+    
+            try:
+                # Note: self.__pydantic_private__ cannot be None if self.__private_attributes__ has items
+                return self.__pydantic_private__[item]  # type: ignore
+            except KeyError as exc:
+                raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}') from exc
+        else:
+            # `__pydantic_extra__` can fail to be set if the model is not yet fully initialized.
+            # See `BaseModel.__repr_args__` for more details
+            try:
+                pydantic_extra = object.__getattribute__(self, '__pydantic_extra__')
+            except AttributeError:
+                pydantic_extra = None
+    
+            if pydantic_extra and item in pydantic_extra:
+                return pydantic_extra[item]
+            else:
+                if hasattr(self.__class__, item):
+                    return super().__getattribute__(item)  # Raises AttributeError if appropriate
+                else:
+                    # this is the current error
+>                   raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E                   AttributeError: 'FaultAnalysisV2Response' object has no attribute 'diagnosis'
+
+../../../../.pyenv/versions/3.11.8/lib/python3.11/site-packages/pydantic/main.py:1042: AttributeError
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:230 Memory layer failed (non-fatal): 403 Cloud Firestore API has not been used in project antigravity-sandbox-amh before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry. [reason: "SERVICE_DISABLED"
+domain: "googleapis.com"
+metadata {
+  key: "service"
+  value: "firestore.googleapis.com"
+}
+metadata {
+  key: "serviceTitle"
+  value: "Cloud Firestore API"
+}
+metadata {
+  key: "containerInfo"
+  value: "antigravity-sandbox-amh"
+}
+metadata {
+  key: "consumer"
+  value: "projects/antigravity-sandbox-amh"
+}
+metadata {
+  key: "activationUrl"
+  value: "https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh"
+}
+, locale: "en-US"
+message: "Cloud Firestore API has not been used in project antigravity-sandbox-amh before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry."
+, links {
+  description: "Google developers console API activation"
+  url: "https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh"
+}
+]
+WARNING  app.services.rag_service:rag_service.py:107 Hybrid search failed, falling back to legacy retriever: 403 Request had insufficient authentication scopes. [reason: "ACCESS_TOKEN_SCOPE_INSUFFICIENT"
+metadata {
+  key: "service"
+  value: "generativelanguage.googleapis.com"
+}
+metadata {
+  key: "method"
+  value: "google.ai.generativelanguage.v1beta.GenerativeService.EmbedContent"
+}
+]
+WARNING  app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:465 LLM attempt 1/2 execute failed: LLM connection timeout
+WARNING  app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:465 LLM attempt 2/2 execute failed: LLM connection timeout
+ERROR    app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:467 LLM failed to return valid JSON. Degrading to raw text. Last Error: LLM connection timeout
+ERROR    app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:341 JSON parsing failed entirely for row 99. Degrading to raw text.
+_____________________ test_empty_rag_still_returns_result ______________________
+
+    def test_empty_rag_still_returns_result():
+        svc = _make_loaded_service()
+        empty_retriever = MagicMock()
+        empty_retriever.retrieve.return_value = []
+        rag_empty = RAGService(retriever=empty_retriever)
+        orch = FaultAnalysisOrchestrator(
+            llm=_GoodMockLLM(),
+            rag_service=rag_empty,
+            validator=FaultResponseValidator(),
+            fault_service=svc,
+        )
+        result = orch.analyze_fault(FaultAnalysisRequest(row_id=99, project_id="default"))
+        assert result.docs_used == 0
+>       assert result.diagnosis  # must still have a diagnosis
+               ^^^^^^^^^^^^^^^^
+
+tests/test_fault_rag_integration.py:245: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = FaultAnalysisV2Response(analysis_version='v4.0', dataset_hash='d7439bee24773bcbfa2d0a97947ee36227b10d1022b1a55847e9289...nse was not valid JSON. Returned raw text instead.'], llm_latency_ms=2.5, rag_latency_ms=234.0, total_latency_ms=382.7)
+item = 'diagnosis'
+
+    def __getattr__(self, item: str) -> Any:
+        private_attributes = object.__getattribute__(self, '__private_attributes__')
+        if item in private_attributes:
+            attribute = private_attributes[item]
+            if hasattr(attribute, '__get__'):
+                return attribute.__get__(self, type(self))  # type: ignore
+    
+            try:
+                # Note: self.__pydantic_private__ cannot be None if self.__private_attributes__ has items
+                return self.__pydantic_private__[item]  # type: ignore
+            except KeyError as exc:
+                raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}') from exc
+        else:
+            # `__pydantic_extra__` can fail to be set if the model is not yet fully initialized.
+            # See `BaseModel.__repr_args__` for more details
+            try:
+                pydantic_extra = object.__getattribute__(self, '__pydantic_extra__')
+            except AttributeError:
+                pydantic_extra = None
+    
+            if pydantic_extra and item in pydantic_extra:
+                return pydantic_extra[item]
+            else:
+                if hasattr(self.__class__, item):
+                    return super().__getattribute__(item)  # Raises AttributeError if appropriate
+                else:
+                    # this is the current error
+>                   raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E                   AttributeError: 'FaultAnalysisV2Response' object has no attribute 'diagnosis'
+
+../../../../.pyenv/versions/3.11.8/lib/python3.11/site-packages/pydantic/main.py:1042: AttributeError
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:230 Memory layer failed (non-fatal): 403 Cloud Firestore API has not been used in project antigravity-sandbox-amh before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry. [reason: "SERVICE_DISABLED"
+domain: "googleapis.com"
+metadata {
+  key: "service"
+  value: "firestore.googleapis.com"
+}
+metadata {
+  key: "serviceTitle"
+  value: "Cloud Firestore API"
+}
+metadata {
+  key: "containerInfo"
+  value: "antigravity-sandbox-amh"
+}
+metadata {
+  key: "consumer"
+  value: "projects/antigravity-sandbox-amh"
+}
+metadata {
+  key: "activationUrl"
+  value: "https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh"
+}
+, locale: "en-US"
+message: "Cloud Firestore API has not been used in project antigravity-sandbox-amh before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry."
+, links {
+  description: "Google developers console API activation"
+  url: "https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=antigravity-sandbox-amh"
+}
+]
+WARNING  app.services.rag_service:rag_service.py:107 Hybrid search failed, falling back to legacy retriever: 403 Request had insufficient authentication scopes. [reason: "ACCESS_TOKEN_SCOPE_INSUFFICIENT"
+metadata {
+  key: "service"
+  value: "generativelanguage.googleapis.com"
+}
+metadata {
+  key: "method"
+  value: "google.ai.generativelanguage.v1beta.GenerativeService.EmbedContent"
+}
+]
+WARNING  app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:458 LLM attempt 1/2 validation failed: 4 validation errors for StructuredLLMOutput
+fault_summary
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+root_cause
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+trigger_mechanism
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+resolution_steps
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+WARNING  app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:458 LLM attempt 2/2 validation failed: 4 validation errors for StructuredLLMOutput
+fault_summary
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+root_cause
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+trigger_mechanism
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+resolution_steps
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+ERROR    app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:467 LLM failed to return valid JSON. Degrading to raw text. Last Error: 4 validation errors for StructuredLLMOutput
+fault_summary
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+root_cause
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+trigger_mechanism
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+resolution_steps
+  Field required [type=missing, input_value={'diagnosis': 'Fault caus... 'confidence': 'MEDIUM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+ERROR    app.services.fault_analysis_orchestrator:fault_analysis_orchestrator.py:341 JSON parsing failed entirely for row 99. Degrading to raw text.
+____________________________ test_upload_empty_file ____________________________
+
+    def test_upload_empty_file():
+        with tempfile.TemporaryDirectory(dir="./data") as tmpdir:
+            # Create empty file
+            with open(os.path.join(tmpdir, "empty.csv"), "w") as f:
+                f.write("")
+    
+            res = client.post(
+                "/api/project/ingest",
+                json={"folder_path": tmpdir, "project_id": "test_empty"}
+            )
+>           assert res.status_code == 200, res.text
+E           AssertionError: {"error_type":"INGESTION_FAILED","message":"'FirestoreClient' object has no attribute 'get_document'"}
+E           assert 500 == 200
+E            +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests/test_phase11_functional.py:25: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    app.api.routes_project_knowledge:routes_project_knowledge.py:88 Ingestion failed for project=test_empty
+Traceback (most recent call last):
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/api/routes_project_knowledge.py", line 64, in ingest_project
+    result = await pipeline.ingest(body.folder_path, body.project_id, uid=user.uid)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/services/project_ingestion_pipeline.py", line 81, in ingest
+    return await self._run_ingestion(folder_path, project_id, progress_callback, uid)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/services/project_ingestion_pipeline.py", line 104, in _run_ingestion
+    embedder = get_embedder_for_user(uid)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/embeddings/embedder_factory.py", line 64, in get_embedder_for_user
+    config = svc.get_provider_config(uid)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/services/user_settings_service.py", line 141, in get_provider_config
+    doc = self._db.get_document(f"users/{uid}/settings", "provider")
+          ^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'FirestoreClient' object has no attribute 'get_document'
+__________________________ test_upload_malformed_csv ___________________________
+
+    def test_upload_malformed_csv():
+        with tempfile.TemporaryDirectory(dir="./data") as tmpdir:
+            with open(os.path.join(tmpdir, "malformed.csv"), "w") as f:
+                f.write("date,value,tag\\n12/--/2023,abc,tag_A\\n...")
+    
+            res = client.post(
+                "/api/project/ingest",
+                json={"folder_path": tmpdir, "project_id": "test_malformed"}
+            )
+>           assert res.status_code == 200, res.text
+E           AssertionError: {"error_type":"INGESTION_FAILED","message":"'FirestoreClient' object has no attribute 'get_document'"}
+E           assert 500 == 200
+E            +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests/test_phase11_functional.py:36: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    app.api.routes_project_knowledge:routes_project_knowledge.py:88 Ingestion failed for project=test_malformed
+Traceback (most recent call last):
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/api/routes_project_knowledge.py", line 64, in ingest_project
+    result = await pipeline.ingest(body.folder_path, body.project_id, uid=user.uid)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/services/project_ingestion_pipeline.py", line 81, in ingest
+    return await self._run_ingestion(folder_path, project_id, progress_callback, uid)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/services/project_ingestion_pipeline.py", line 104, in _run_ingestion
+    embedder = get_embedder_for_user(uid)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/embeddings/embedder_factory.py", line 64, in get_embedder_for_user
+    config = svc.get_provider_config(uid)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/services/user_settings_service.py", line 141, in get_provider_config
+    doc = self._db.get_document(f"users/{uid}/settings", "provider")
+          ^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'FirestoreClient' object has no attribute 'get_document'
+__________________________ test_massive_csv_ingestion __________________________
+
+    def test_massive_csv_ingestion():
+        # Simulate a very large string of repeated data to test memory parsing
+        header = "timestamp,device_id,event_type,severity\\n"
+        row = "2023-01-01T12:00:00Z,PLC_1,FAULT,HIGH\\n"
+        # ~2MB of CSV text -> Dropping to 5000 rows to prevent Qdrant synchronous timeout during Pytest
+        file_data = header + (row * 5000)
+    
+        with tempfile.TemporaryDirectory(dir="./data") as tmpdir:
+            with open(os.path.join(tmpdir, "massive.csv"), "w") as f:
+                f.write(file_data)
+    
+            res = client.post(
+                "/api/project/ingest",
+                json={"folder_path": tmpdir, "project_id": "test_massive"}
+            )
+>           assert res.status_code == 200, res.text
+E           AssertionError: {"error_type":"INGESTION_FAILED","message":"'FirestoreClient' object has no attribute 'get_document'"}
+E           assert 500 == 200
+E            +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests/test_phase11_functional.py:98: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    app.api.routes_project_knowledge:routes_project_knowledge.py:88 Ingestion failed for project=test_massive
+Traceback (most recent call last):
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/api/routes_project_knowledge.py", line 64, in ingest_project
+    result = await pipeline.ingest(body.folder_path, body.project_id, uid=user.uid)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/services/project_ingestion_pipeline.py", line 81, in ingest
+    return await self._run_ingestion(folder_path, project_id, progress_callback, uid)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/services/project_ingestion_pipeline.py", line 104, in _run_ingestion
+    embedder = get_embedder_for_user(uid)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/embeddings/embedder_factory.py", line 64, in get_embedder_for_user
+    config = svc.get_provider_config(uid)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/services/user_settings_service.py", line 141, in get_provider_config
+    doc = self._db.get_document(f"users/{uid}/settings", "provider")
+          ^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'FirestoreClient' object has no attribute 'get_document'
+=============================== warnings summary ===============================
+app/ingestion/processors.py:6
+  /Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/ingestion/processors.py:6: FutureWarning: 
+  
+  All support for the `google.generativeai` package has ended. It will no longer be receiving 
+  updates or bug fixes. Please switch to the `google.genai` package as soon as possible.
+  See README for more details:
+  
+  https://github.com/google-gemini/deprecated-generative-ai-python/blob/main/README.md
+  
+    import google.generativeai as genai
+
+tests/test_fault_rag_integration.py::test_rag_returns_docs
+tests/test_fault_rag_integration.py::test_llm_output_parsed
+  /Users/adityamhaske/.pyenv/versions/3.11.8/lib/python3.11/site-packages/google/auth/_default.py:114: UserWarning: Your application has authenticated using end user credentials from Google Cloud SDK without a quota project. You might receive a "quota exceeded" or "API not enabled" error. See the following page for troubleshooting: https://cloud.google.com/docs/authentication/adc-troubleshooting/user-creds. 
+    warnings.warn(_CLOUD_SDK_CREDENTIALS_WARNING)
+
+tests/test_fault_rag_integration.py::test_llm_output_parsed
+tests/test_fault_rag_integration.py::test_hallucinated_tags_removed
+tests/test_fault_rag_integration.py::test_llm_timeout_uses_fallback
+tests/test_fault_rag_integration.py::test_empty_rag_still_returns_result
+tests/test_fault_rag_integration.py::test_confidence_computed_deterministically
+tests/test_fault_rag_integration.py::test_response_includes_sources
+tests/test_phase11_functional.py::test_statistical_engine_zero_flatline
+  /Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/utils/fault_statistics.py:148: FutureWarning: The behavior of DatetimeProperties.to_pydatetime is deprecated, in a future version this will return a Series containing python datetime objects instead of an ndarray. To retain the old behavior, call `np.array` on the result
+    timestamps = df["timestamp"].dt.to_pydatetime().tolist()
+
+tests/test_fault_rag_integration.py::test_llm_output_parsed
+tests/test_fault_rag_integration.py::test_hallucinated_tags_removed
+tests/test_fault_rag_integration.py::test_llm_timeout_uses_fallback
+tests/test_fault_rag_integration.py::test_empty_rag_still_returns_result
+tests/test_fault_rag_integration.py::test_confidence_computed_deterministically
+tests/test_fault_rag_integration.py::test_confidence_computed_deterministically
+tests/test_fault_rag_integration.py::test_response_includes_sources
+  /Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/utils/fault_statistics.py:30: FutureWarning: The behavior of DatetimeProperties.to_pydatetime is deprecated, in a future version this will return a Series containing python datetime objects instead of an ndarray. To retain the old behavior, call `np.array` on the result
+    return series.dt.to_pydatetime().tolist()
+
+tests/test_fault_rag_integration.py: 14 warnings
+  /Users/adityamhaske/Documents/projects/IndusAI/industrial_ai_assistant/app/services/fault_analysis_orchestrator.py:438: PydanticDeprecatedSince20: The `schema` method is deprecated; use `model_json_schema` instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    json_schema=schema_model.schema(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_fault_rag_integration.py::test_llm_output_parsed - Assertio...
+FAILED tests/test_fault_rag_integration.py::test_hallucinated_tags_removed - ...
+FAILED tests/test_fault_rag_integration.py::test_llm_timeout_uses_fallback - ...
+FAILED tests/test_fault_rag_integration.py::test_empty_rag_still_returns_result
+FAILED tests/test_phase11_functional.py::test_upload_empty_file - AssertionEr...
+FAILED tests/test_phase11_functional.py::test_upload_malformed_csv - Assertio...
+FAILED tests/test_phase11_functional.py::test_massive_csv_ingestion - Asserti...
+================== 7 failed, 10 passed, 31 warnings in 7.07s ===================

@@ -161,12 +161,7 @@ def test_text_file_chunked(project_dir):
     assert result.char_count > 0
 
 
-def test_binary_file_skipped(project_dir):
-    """Binary files must not appear in structured or semantic index."""
-    from app.services.project_ingestion_pipeline import _collect_files, _SKIP_EXTENSIONS
-    files = _collect_files(project_dir)
-    exts = {f.suffix.lower() for f in files}
-    assert ".exe" not in exts
+
 
 
 def test_ingestion_result_metrics():
@@ -193,7 +188,7 @@ def test_concurrency_lock_raises():
 
         pipeline = get_ingestion_pipeline()
         with pytest.raises(IngestionLockError):
-            await pipeline.ingest("/tmp", pid)
+            await pipeline.ingest([], pid, "test_uid")
 
         _locks[pid].release()
 

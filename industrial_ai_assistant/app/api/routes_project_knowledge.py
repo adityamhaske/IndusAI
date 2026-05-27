@@ -61,7 +61,7 @@ async def ingest_project(
     """
     try:
         pipeline = get_ingestion_pipeline()
-        result = await pipeline.ingest(body.folder_path, body.project_id, uid=user.uid)
+        result = await pipeline.ingest([body.folder_path], body.project_id, user.uid)
         return result
     except IngestionLockError as exc:
         return JSONResponse(

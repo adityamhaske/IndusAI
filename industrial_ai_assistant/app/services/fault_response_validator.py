@@ -8,7 +8,8 @@ Rules:
   4. If retry_count > 0, this is a retry — be more lenient on empty fields.
 """
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
+import re
 
 from app.models.fault_analysis_models import StructuredLLMOutput
 
@@ -20,11 +21,12 @@ class FaultResponseValidator:
 
     def validate(
         self,
-        output: StructuredLLMOutput,
+        output: Union[StructuredLLMOutput, str],
         retrieved_doc_sources: List[str],
         known_tags: Optional[List[str]] = None,
         is_retry: bool = False,
-    ) -> Tuple[StructuredLLMOutput, List[str], List[str]]:
+        raw_text: Optional[str] = None,
+    ) -> Tuple[Optional[StructuredLLMOutput], List[str], List[str]]:
         """
         Validate and clean the LLM output.
 
@@ -34,7 +36,22 @@ class FaultResponseValidator:
         warnings: List[str] = []
         hallucinated: List[str] = []
 
-        # ── 1. Field completeness checks ──────────────────────────────────────
+        # ── 0. Hallucination check (works on both object and string) ──────────
+        if known_tags is not None:
+            text_to_scan = raw_text if raw_text is not None else (output if isinstance(output, str) else output.model_dump_json())
+            tags_match = re.search(r'"related_plc_tags"\s*:\s*\[(.*?)\]', text_to_scan)
+            if tags_match:
+                tags_str = tags_match.group(1)
+                tags = [t.strip(' "\'') for t in tags_str.split(',') if t.strip(' "\'')]
+                for t in tags:
+                    if t not in known_tags:
+                        hallucinated.append(t)
+                        warnings.append(f"Removed hallucinated tag: {t}")
+
+        if isinstance(output, str):
+            # Cannot perform field completeness checks on raw text
+            return None, hallucinated, warnings
+
         # ── 1. Field completeness checks ──────────────────────────────────────
         if not output.fault_summary or len(output.fault_summary.strip()) < 10:
             warnings.append("LLM fault_summary is empty or too short.")

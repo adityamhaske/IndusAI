@@ -35,14 +35,10 @@ def _make_loaded_service(n=100) -> FaultService:
 class _GoodMockLLM:
     def execute(self, req, **kw):
         payload = {
-            "diagnosis": "Fault caused by sensor mismatch during pallet lift cycle.",
-            "metrics": {
-                "likely_causes": ["Sensor threshold mismatch", "Timing issue in PLC rung"],
-                "diagnostic_steps": ["Check sensor status in I/O monitor", "Review timing rung sequence"],
-                "preventive_actions": ["Calibrate sensor annually", "Add hysteresis to threshold"],
-                "related_plc_tags": []
-            },
-            "primary_action": "Recalibrate the lift sensor and update the rung logic hysteresis.",
+            "fault_summary": "Fault caused by sensor mismatch during pallet lift cycle.",
+            "root_cause": "Sensor threshold mismatch",
+            "trigger_mechanism": "Timing issue in PLC rung",
+            "resolution_steps": ["Calibrate sensor annually", "Add hysteresis to threshold"],
             "confidence": "MEDIUM"
         }
         return AIResponse(
@@ -70,14 +66,11 @@ class _HallucinationLLM:
     """Returns valid JSON but with invented PLC tags."""
     def execute(self, req, **kw):
         payload = {
-            "diagnosis": "Fault analysis hallucination test",
-            "metrics": {
-                "likely_causes": ["Tag mismatch"],
-                "diagnostic_steps": ["Check"],
-                "preventive_actions": [],
-                "related_plc_tags": ["FAKE_TAG_XYZ", "INVENTED_DB99_VAR"]
-            },
-            "primary_action": "Check the invented tags",
+            "fault_summary": "Fault analysis hallucination test",
+            "root_cause": "Tag mismatch",
+            "trigger_mechanism": "Check",
+            "resolution_steps": ["Check the invented tags"],
+            "related_plc_tags": ["FAKE_TAG_XYZ", "INVENTED_DB99_VAR"],
             "confidence": "HIGH"
         }
         return AIResponse(
@@ -152,10 +145,9 @@ def test_llm_output_parsed():
         fault_service=svc,
     )
     result = orch.analyze_fault(FaultAnalysisRequest(row_id=99, project_id="default"))
-    assert result.analysis_version == "v3.0"
-    assert "sensor" in result.diagnosis.lower()
-    assert len(result.evidence.get("likely_causes", [])) >= 1
-    assert len(result.evidence.get("diagnostic_steps", [])) >= 1
+    assert result.analysis_version == "v4.0"
+    assert "sensor" in result.fault_summary.lower()
+    assert len(result.resolution_steps) >= 1
 
 
 # ── Test 4: Hallucinated tag rejected ────────────────────────────────────────
@@ -165,8 +157,8 @@ def test_hallucinated_tags_removed():
     known_tags = ["GOOD_TAG_A", "GOOD_TAG_B"]
 
     class ValidatorWithKnownTags(FaultResponseValidator):
-        def validate(self, output, doc_sources, known_tags=None, is_retry=False):
-            return super().validate(output, doc_sources, known_tags=["GOOD_TAG_A", "GOOD_TAG_B"], is_retry=is_retry)
+        def validate(self, output, doc_sources, known_tags=None, is_retry=False, raw_text=None):
+            return super().validate(output, doc_sources, known_tags=["GOOD_TAG_A", "GOOD_TAG_B"], is_retry=is_retry, raw_text=raw_text)
 
     orch = FaultAnalysisOrchestrator(
         llm=_HallucinationLLM(),
@@ -223,7 +215,7 @@ def test_llm_timeout_uses_fallback():
     )
 
     result = orch.analyze_fault(FaultAnalysisRequest(row_id=99, project_id="default"))
-    assert "[STRUCTURED PARSE FAILED" in result.diagnosis
+    assert "[PARSE FAILED" in result.fault_summary
     assert result.confidence == "LOW"
 
 
@@ -242,7 +234,8 @@ def test_empty_rag_still_returns_result():
     )
     result = orch.analyze_fault(FaultAnalysisRequest(row_id=99, project_id="default"))
     assert result.docs_used == 0
-    assert result.diagnosis  # must still have a diagnosis
+    assert result.fault_summary
+    assert "[PARSE FAILED]" not in result.fault_summary
 
 
 # ── Test 8: Determinism — confidence not in LLM response ─────────────────────

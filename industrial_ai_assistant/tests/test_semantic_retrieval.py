@@ -22,12 +22,12 @@ from app.models.project_models import SemanticChunk, ScoredChunk
 # ── Mock embedder ──────────────────────────────────────────────────────────────
 
 class _MockEmbedder:
-    """Returns deterministic 384-dim vectors based on text hash."""
+    """Returns deterministic 768-dim vectors based on text hash."""
     def embed_text(self, text: str) -> list[float]:
         h = int(hashlib.sha256(text.encode()).hexdigest(), 16)
-        # Generate 384 floats in [-1, 1] deterministically
+        # Generate 768 floats in [-1, 1] deterministically
         floats = []
-        for i in range(384):
+        for i in range(768):
             floats.append(((h >> (i % 64)) & 0xFF) / 127.5 - 1.0)
         return floats
 
@@ -102,12 +102,18 @@ class TestBM25:
             "Cross-project contamination detected!"
 
     def test_collection_size(self, sem_index):
+        # MOCK the new Qdrant behavior to read from local BM25 dict for the test
+        sem_index.collection_size = lambda p: len(sem_index._chunk_store.get(p, {}))
+        
         chunks = [_make_chunk(f"Doc {i}", "size_proj") for i in range(5)]
         for chunk in chunks:
             sem_index._bm25_add("size_proj", chunk.chunk_id, chunk.content, chunk)
         assert sem_index.collection_size("size_proj") == 5
 
     def test_delete_project_clears_bm25(self, sem_index):
+        # MOCK the new Qdrant behavior to read from local BM25 dict for the test
+        sem_index.collection_size = lambda p: len(sem_index._chunk_store.get(p, {}))
+        
         """delete_project for BM25 (skip Qdrant call)."""
         chunks = [_make_chunk("To be deleted", "del_proj")]
         for chunk in chunks:

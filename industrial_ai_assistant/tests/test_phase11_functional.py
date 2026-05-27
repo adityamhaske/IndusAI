@@ -8,12 +8,36 @@ from io import BytesIO
 
 client = TestClient(app)
 
+from unittest.mock import MagicMock, patch
 import tempfile
 import os
+
+@pytest.fixture(autouse=True)
+def mock_firestore():
+    with patch("app.services.user_settings_service.get_firestore") as mock_get:
+        mock_db = MagicMock()
+        mock_db.get_document = MagicMock(return_value={
+            "llm_provider": "gemini",
+            "embedding_provider": "gemini",
+            "llm_api_key_enc": "<test-encrypted-key>",
+            "embedding_api_key_enc": "<test-encrypted-key>",
+            "ollama_url": None
+        })
+        mock_get.return_value = mock_db
+        with patch("app.services.project_ingestion_pipeline.get_storage_bucket") as mock_bucket:
+            # We don't really care about the bucket contents since we just want the endpoint to return 200
+            yield mock_get
 
 # --- 1. Ingestion Bounds ---
 def test_upload_empty_file():
     with tempfile.TemporaryDirectory(dir="./data") as tmpdir:
+        mock_firestore = MagicMock()
+        mock_firestore.get_document = MagicMock(return_value={
+            "llm_provider": "gemini",
+            "encrypted_api_key": "<test-encrypted-key>",
+            "ollama_url": None
+        })
+        mock_auth = MagicMock()
         # Create empty file
         with open(os.path.join(tmpdir, "empty.csv"), "w") as f:
             f.write("")

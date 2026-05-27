@@ -11,19 +11,29 @@ from app.core.interfaces.chunker_interface import ChunkerInterface
 logger = logging.getLogger(__name__)
 
 class PDFProcessor:
-    def __init__(self, chunker: ChunkerInterface):
+    def __init__(self, chunker: ChunkerInterface, api_key: str):
         self.chunker = chunker
+        self.api_key = api_key
         
-    def process(self, file_path: str) -> List[DocumentChunk]:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
+    def process(self, file_bytes: bytes, filename: str) -> List[DocumentChunk]:
+        if not self.api_key:
             logger.error("GEMINI_API_KEY is missing")
-            raise ValueError("GEMINI_API_KEY is required to process PDFs")
+            raise ValueError("API key is required to process PDFs")
             
-        genai.configure(api_key=api_key)
+        genai.configure(api_key=self.api_key)
         
-        logger.info(f"Uploading {file_path} to Gemini...")
-        uploaded_file = genai.upload_file(path=file_path, display_name=Path(file_path).name)
+        logger.info(f"Uploading {filename} to Gemini...")
+        
+        # Write bytes to temp file because upload_file needs a path or fd
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+            
+        try:
+            uploaded_file = genai.upload_file(path=tmp_path, display_name=Path(filename).name)
+        finally:
+            os.unlink(tmp_path)
         
         MAX_WAIT_SECONDS = 30
         POLL_INTERVAL = 2
@@ -67,7 +77,7 @@ class PDFProcessor:
         for text_chunk in chunks_text:
             if not isinstance(text_chunk, str) or not text_chunk.strip():
                 continue
-            metadata = ChunkMetadata(source_file=file_path, chunk_id="")
+            metadata = ChunkMetadata(source_file=filename, chunk_id="")
             chunks.extend(self.chunker.chunk_text(text_chunk.strip(), metadata))
             
         return chunks
@@ -76,18 +86,18 @@ class L5XProcessor:
     def __init__(self, chunker: ChunkerInterface):
         self.chunker = chunker
         
-    def process(self, file_path: str) -> List[DocumentChunk]:
+    def process(self, file_bytes: bytes, filename: str) -> List[DocumentChunk]:
         # TODO: Implement L5X XML parsing
-        text = f"PLC Logic from {file_path}"
-        metadata = ChunkMetadata(source_file=file_path, chunk_id="")
+        text = f"PLC Logic from {filename}"
+        metadata = ChunkMetadata(source_file=filename, chunk_id="")
         return self.chunker.chunk_text(text, metadata)
 
 class ExcelProcessor:
     def __init__(self, chunker: ChunkerInterface):
         self.chunker = chunker
 
-    def process(self, file_path: str) -> List[DocumentChunk]:
+    def process(self, file_bytes: bytes, filename: str) -> List[DocumentChunk]:
         # TODO: Implement Excel parsing (e.g. using pandas/openpyxl)
-        text = f"Tabular data from {file_path}"
-        metadata = ChunkMetadata(source_file=file_path, chunk_id="")
+        text = f"Tabular data from {filename}"
+        metadata = ChunkMetadata(source_file=filename, chunk_id="")
         return self.chunker.chunk_text(text, metadata)

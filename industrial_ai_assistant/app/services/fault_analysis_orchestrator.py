@@ -330,7 +330,7 @@ class FaultAnalysisOrchestrator:
                 val_warnings = []
             else:
                 cleaned, hallucinated, val_warnings = self._validator.validate(
-                    llm_output, doc_sources, known_tags=None
+                    llm_output, doc_sources, known_tags=None, raw_text=raw_output
                 )
                 fault_summary = cleaned.fault_summary
                 root_cause = cleaned.root_cause
@@ -339,13 +339,23 @@ class FaultAnalysisOrchestrator:
                 final_confidence = cleaned.confidence or confidence
         else:
             logger.error("JSON parsing failed entirely for row %d. Degrading to raw text.", request.row_id)
-            fault_summary = f"[STRUCTURED PARSE FAILED - RAW OUTPUT]\n{raw_output}"
-            root_cause = "Unknown / Parse Failed"
-            trigger_mechanism = "Unknown / Parse Failed"
-            resolution_steps = ["Manual Review Required - AI Response was malformed."]
+            
+            # Step 1: Run FaultResponseValidator on the raw text
+            _, hallucinated, val_warnings = self._validator.validate(
+                raw_output, doc_sources, known_tags=None, raw_text=raw_output
+            )
+            
+            # Step 2: Use mapping
+            fault_summary = "[PARSE FAILED] " + raw_output[:500]
+            root_cause = "Unable to determine — LLM output failed structured validation twice. Raw response preserved in fault_summary."
+            trigger_mechanism = "Unknown — see fault_summary for raw LLM output."
+            resolution_steps = [
+                "Review raw LLM output in fault_summary.",
+                "Re-run analysis or check your API key is valid.",
+                "Contact support if issue persists."
+            ]
             final_confidence = "LOW"
-            hallucinated = []
-            val_warnings = ["LLM response was not valid JSON. Returned raw text instead."]
+            val_warnings.append("LLM response was not valid JSON. Returned raw text instead.")
 
         # ── Step 9: Confidence V2 (numeric 0-100%) ───────────────────────────
         retrieval_scores = [d.relevance_score for d in rag_docs if d.relevance_score]

@@ -2,7 +2,7 @@
 User Settings Service — BYOK API key management.
 
 Stores encrypted API keys and provider preferences in Firestore
-at /users/{uid}/settings/provider.
+at /users/{uid}/profile/settings.
 
 Public methods:
     get_settings(uid)     → dict (keys masked)
@@ -39,7 +39,7 @@ class UserSettingsService:
 
     def get_settings(self, uid: str) -> dict:
         """Return user settings with keys masked."""
-        doc = self._db.get_document(f"users/{uid}/settings", "provider")
+        doc = self._db.get_document(f"users/{uid}/profile", "settings")
         if not doc:
             return {
                 "llm_provider": None,
@@ -116,7 +116,7 @@ class UserSettingsService:
         if not update:
             return self.get_settings(uid)
 
-        self._db.set_document(f"users/{uid}/settings", "provider", update, merge=True)
+        self._db.set_document(f"users/{uid}/profile", "settings", update, merge=True)
         logger.info("Saved provider settings for uid=%s provider=%s", uid, llm_provider)
         return self.get_settings(uid)
 
@@ -124,7 +124,7 @@ class UserSettingsService:
 
     def get_raw_key(self, uid: str, key_name: str = "llm_api_key_enc") -> Optional[str]:
         """Decrypt and return a raw API key. For internal factory use only."""
-        doc = self._db.get_document(f"users/{uid}/settings", "provider")
+        doc = self._db.get_document(f"users/{uid}/profile", "settings")
         if not doc:
             return None
         enc = doc.get(key_name, "")
@@ -138,7 +138,7 @@ class UserSettingsService:
 
     def get_provider_config(self, uid: str) -> dict:
         """Return raw provider config (provider name, model, ollama url) without keys."""
-        doc = self._db.get_document(f"users/{uid}/settings", "provider")
+        doc = self._db.get_document(f"users/{uid}/profile", "settings")
         if not doc:
             return {}
         return {

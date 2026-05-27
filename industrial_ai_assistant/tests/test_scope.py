@@ -16,18 +16,12 @@ def test_scope():
         scope_mode="STRICT"
     )
     
-    print("Testing STRICT mode file explanation fast-path...")
-    res = orch.query(req)
+    import pytest
+    from app.core.project_exceptions import ProjectNotReadyError
     
-    print("\n--- RESULTS ---")
-    print("Truncated:", res.context_scope.get("truncated"))
-    print("Total Candidates:", res.context_scope.get("total_candidates"))
-    print("Used Chunks:", res.context_scope.get("used_chunks"))
-    print("Answer:")
-    try:
-        print(json.loads(res.answer)["summary"])
-    except:
-        print(res.answer)
+    print("Testing STRICT mode file explanation fast-path (expects ProjectNotReadyError)...")
+    with pytest.raises(ProjectNotReadyError):
+        res = orch.query(req)
 
 if __name__ == "__main__":
     test_scope()
