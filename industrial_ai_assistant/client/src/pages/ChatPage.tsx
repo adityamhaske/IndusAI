@@ -59,12 +59,12 @@ const Message = ({ msg }) => {
 
 // ── Scope Controls (Compact Chip) ──────────────────────────────────────────────
 const ScopeChip = () => {
-    const selectedFiles = useAppStore(s => s.selectedFiles);
-    const selectedFolders = useAppStore(s => s.selectedFolders);
+    const selectedFiles = useAppStore(s => s.selectedFiles) || [];
+    const selectedFolders = useAppStore(s => s.selectedFolders) || [];
     const scopeMode = useAppStore(s => s.scopeMode);
     const setScopeMode = useAppStore(s => s.setScopeMode);
 
-    const count = selectedFiles.length + selectedFolders.length;
+    const count = (selectedFiles?.length || 0) + (selectedFolders?.length || 0);
 
     return (
         <div className="px-5 pt-3 flex items-center gap-3 flex-wrap">
@@ -145,8 +145,8 @@ const ChatPage = () => {
     const appendAssistantMessage = useAppStore(s => s.appendAssistantMessage);
     const knowledgeStatus = useAppStore(s => s.knowledgeStatus);
     const setKnowledgeStatus = useAppStore(s => s.setKnowledgeStatus);
-    const selectedFiles = useAppStore(s => s.selectedFiles);
-    const selectedFolders = useAppStore(s => s.selectedFolders);
+    const selectedFiles = useAppStore(s => s.selectedFiles) || [];
+    const selectedFolders = useAppStore(s => s.selectedFolders) || [];
     const scopeMode = useAppStore(s => s.scopeMode);
 
     const [isLoading, setIsLoading] = React.useState(false);
@@ -210,7 +210,7 @@ const ChatPage = () => {
     const showWelcome = chatHistory.length === 0;
 
     const isProjectLoaded = activeProjectId && activeProjectId !== 'default' && knowledgeStatus?.project_loaded;
-    const isStrictInvalid = scopeMode === 'STRICT' && selectedFiles.length === 0 && selectedFolders.length === 0;
+    const isStrictInvalid = scopeMode === 'STRICT' && (selectedFiles?.length || 0) === 0 && (selectedFolders?.length || 0) === 0;
 
     if (!isProjectLoaded) {
         return (

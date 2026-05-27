@@ -84,8 +84,8 @@ export default function ProjectExplorer() {
         localStorage.setItem('explorerOpen', isOpen);
     }, [isOpen]);
 
-    const selectedFiles = useAppStore(s => s.selectedFiles);
-    const selectedFolders = useAppStore(s => s.selectedFolders);
+    const selectedFiles = useAppStore(s => s.selectedFiles) || [];
+    const selectedFolders = useAppStore(s => s.selectedFolders) || [];
     const setSelectedFiles = useAppStore(s => s.setSelectedFiles);
     const setSelectedFolders = useAppStore(s => s.setSelectedFolders);
     const activeProjectId = useAppStore(s => s.activeProjectId);
