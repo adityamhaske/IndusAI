@@ -145,12 +145,24 @@ async def ingest_upload(
             content = await upload.read()
 
             if rel.lower().endswith(".pdf"):
-                if upload.content_type != "application/pdf":
-                    save_errors.append(f"{rel}: Not a valid PDF file (invalid MIME type)")
+                # Only reject files that explicitly identify as a non-PDF type.
+                # Browsers often send empty strings or 'application/octet-stream'
+                # for valid PDFs, so we MUST NOT reject those.
+                explicit_non_pdf = (
+                    upload.content_type
+                    and upload.content_type not in (
+                        "application/pdf",
+                        "application/octet-stream",
+                        "",
+                    )
+                )
+                if explicit_non_pdf:
+                    save_errors.append(f"{rel}: Rejected — declared content-type '{upload.content_type}' is not a PDF")
                     skipped += 1
                     continue
-                if len(content) > 20 * 1024 * 1024:
-                    save_errors.append(f"{rel}: File size exceeds 20MB limit for Gemini API")
+                # 50 MB limit for Gemini File API
+                if len(content) > 50 * 1024 * 1024:
+                    save_errors.append(f"{rel}: File size exceeds 50MB limit")
                     skipped += 1
                     continue
 
@@ -168,10 +180,10 @@ async def ingest_upload(
             save_errors.append(f"{rel}: {exc}")
             skipped += 1
 
-    if saved == 0 and skipped == 0:
+    if saved == 0:
         return JSONResponse(status_code=400, content={
             "error": "NO_FILES_SAVED",
-            "message": "No files could be saved.",
+            "message": "No files could be saved. All files were rejected or failed.",
             "errors": save_errors[:5],
         })
 

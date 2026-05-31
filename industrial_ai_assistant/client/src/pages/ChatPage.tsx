@@ -7,8 +7,24 @@ import ProjectExplorer from '../components/chat/ProjectExplorer';
 
 import { Link } from 'react-router-dom';
 
+// ── Types ─────────────────────────────────────────────────────────────────────
+interface KnowledgeStatus {
+    project_loaded?: boolean;
+    folder?: string;
+    tags_indexed?: number;
+}
+
+interface ChatMessage {
+    id: number | string;
+    role: 'user' | 'assistant';
+    content: string | null;
+    structuredResponse?: Record<string, unknown>;
+    timestamp: string;
+    projectId?: string;
+}
+
 // ── Knowledge Mode Badge ───────────────────────────────────────────────────────
-const KnowledgeBadge = ({ status }) => {
+const KnowledgeBadge = ({ status }: { status: KnowledgeStatus | null }) => {
     if (!status) return null;
     if (status.project_loaded) {
         const folder = status.folder?.split('/').pop() || 'Project';
@@ -31,7 +47,7 @@ const KnowledgeBadge = ({ status }) => {
 };
 
 // ── Chat Message ───────────────────────────────────────────────────────────────
-const Message = ({ msg }) => {
+const Message = ({ msg }: { msg: ChatMessage }) => {
     const isUser = msg.role === 'user';
     return (
         <div className={`p-5 border-b border-industrial-100 ${isUser ? 'bg-white' : 'bg-industrial-50'}`}>
@@ -105,7 +121,12 @@ const ScopeChip = () => {
 };
 
 // ── Input Bar ──────────────────────────────────────────────────────────────────
-const InputBar = ({ onSend, disabled }) => {
+interface InputBarProps {
+    onSend: (text: string) => void;
+    disabled: boolean;
+}
+
+const InputBar = ({ onSend, disabled }: InputBarProps) => {
     const [text, setText] = React.useState('');
     const submit = () => {
         const q = text.trim();
@@ -140,23 +161,28 @@ const ChatPage = () => {
     // All state lives in the global Zustand store — survives page navigation
     const allChatHistory = useAppStore(s => s.chatHistory);
     const activeProjectId = useAppStore(s => s.activeProjectId);
-    const chatHistory = allChatHistory.filter(m => !m.projectId || m.projectId === activeProjectId);
+    const chatHistory = allChatHistory.filter((m: ChatMessage) => !m.projectId || m.projectId === activeProjectId);
     const appendUserMessage = useAppStore(s => s.appendUserMessage);
     const appendAssistantMessage = useAppStore(s => s.appendAssistantMessage);
-    const knowledgeStatus = useAppStore(s => s.knowledgeStatus);
+    const knowledgeStatus = useAppStore(s => s.knowledgeStatus) as KnowledgeStatus | null;
     const setKnowledgeStatus = useAppStore(s => s.setKnowledgeStatus);
     const selectedFiles = useAppStore(s => s.selectedFiles) || [];
     const selectedFolders = useAppStore(s => s.selectedFolders) || [];
     const scopeMode = useAppStore(s => s.scopeMode);
 
     const [isLoading, setIsLoading] = React.useState(false);
-    const bottomRef = useRef(null);
+    const [statusLoading, setStatusLoading] = React.useState(true);
+    const bottomRef = useRef<HTMLDivElement | null>(null);
 
     // Fetch project status on mount AND when activeProjectId changes
     useEffect(() => {
+        setStatusLoading(true);
         getProjectStatus(activeProjectId || 'default')
-            .then(setKnowledgeStatus)
-            .catch(() => { });
+            .then(s => {
+                setKnowledgeStatus(s);
+                setStatusLoading(false);
+            })
+            .catch(() => { setStatusLoading(false); });
     }, [activeProjectId, setKnowledgeStatus]);
 
     // Auto-scroll
@@ -164,7 +190,7 @@ const ChatPage = () => {
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [chatHistory]);
 
-    const handleSend = useCallback(async (question) => {
+    const handleSend = useCallback(async (question: string) => {
         appendUserMessage(question);
         setIsLoading(true);
         try {
@@ -193,8 +219,8 @@ const ChatPage = () => {
             }
 
             appendAssistantMessage(structured);
-        } catch (err) {
-            const errData = err.data || {};
+        } catch (err: unknown) {
+            const errData = (err as { data?: { error_type?: string; detected_tags?: string[] } })?.data || {};
             const isNotIndexed = errData.error_type === 'PROJECT_NOT_INDEXED';
             appendAssistantMessage(
                 isNotIndexed
@@ -212,6 +238,15 @@ const ChatPage = () => {
     const isProjectLoaded = activeProjectId && activeProjectId !== 'default' && knowledgeStatus?.project_loaded;
     const isStrictInvalid = scopeMode === 'STRICT' && (selectedFiles?.length || 0) === 0 && (selectedFolders?.length || 0) === 0;
 
+    // Loading guard: show spinner while status is resolving to prevent flash of "no project" state
+    if (statusLoading && !knowledgeStatus) {
+        return (
+            <div className="flex flex-col h-full bg-industrial-50 items-center justify-center">
+                <Loader2 className="w-6 h-6 animate-spin text-industrial-400" />
+            </div>
+        );
+    }
+
     if (!isProjectLoaded) {
         return (
             <div className="flex flex-col h-full bg-industrial-50 items-center justify-center p-8 text-center animate-fade-in">
@@ -222,8 +257,8 @@ const ChatPage = () => {
                 <p className="text-industrial-500 max-w-md mb-8 leading-relaxed">
                     To start asking questions about your PLC logic, P&IDs, and fault logs, you need to load an active project workspace.
                 </p>
-                <Link to="/project" className="bg-industrial-900 hover:bg-black text-white font-semibold py-3 px-6 rounded-xl transition-all shadow-sm">
-                    Go to Projects
+                <Link to="/project" className="bg-industrial-900 hover:bg-black text-white font-semibold py-3 px-6 rounded-xl transition-all shadow-sm flex items-center gap-2">
+                    <FolderOpen className="w-4 h-4" /> Go to Projects
                 </Link>
             </div>
         );
@@ -255,7 +290,7 @@ const ChatPage = () => {
                                 </div>
                             </div>
                         )}
-                        {chatHistory.map((msg) => <Message key={msg.id} msg={msg} />)}
+                        {chatHistory.map((msg: ChatMessage) => <Message key={msg.id} msg={msg} />)}
                         {isLoading && (
                             <div className="p-5 bg-industrial-50 border-b border-industrial-100">
                                 <div className="flex items-start gap-3 max-w-3xl mx-auto">

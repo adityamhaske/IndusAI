@@ -1,16 +1,16 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { userApi } from '../../services/userApi';
-import { projectApi } from '../../services/projectApi';
-import { Sparkles, Key, CheckCircle, Loader2, ArrowRight } from 'lucide-react';
+import { Sparkles, Key, CheckCircle, Loader2, ArrowRight, FolderOpen } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { useNavigate } from 'react-router-dom';
 
 export const OnboardingWizard = () => {
     const { hasApiKey, refreshSettings } = useAuth();
+    const navigate = useNavigate();
     const [step, setStep] = useState(1);
     const [apiKey, setApiKey] = useState('');
     const [isSaving, setIsSaving] = useState(false);
-    const [isCreatingDemo, setIsCreatingDemo] = useState(false);
 
     // If they have the key, and they finish, or if they close it, we unmount
     const [dismissed, setDismissed] = useState(false);
@@ -32,17 +32,9 @@ export const OnboardingWizard = () => {
         }
     };
 
-    const handleCreateDemo = async () => {
-        setIsCreatingDemo(true);
-        try {
-            await projectApi.createProject('demo', 'Demo Project');
-            toast.success('Demo project created!');
-            setDismissed(true);
-        } catch (error: any) {
-            toast.error('Failed to create demo project.');
-        } finally {
-            setIsCreatingDemo(false);
-        }
+    const handleGoToProjects = () => {
+        setDismissed(true);
+        navigate('/project');
     };
 
     return (
@@ -114,16 +106,15 @@ export const OnboardingWizard = () => {
                             </div>
                             <h2 className="text-2xl font-bold text-industrial-900 mb-4">All Set!</h2>
                             <p className="text-industrial-600 mb-8 leading-relaxed">
-                                You're ready to use IndusAI. Would you like to create a demo project to explore the features?
+                                Your API key is saved. Head to the Projects page to upload your first project files and start indexing.
                             </p>
                             
                             <div className="flex flex-col gap-3">
                                 <button
-                                    onClick={handleCreateDemo}
-                                    disabled={isCreatingDemo}
-                                    className="w-full flex items-center justify-center gap-2 bg-industrial-900 hover:bg-black disabled:bg-industrial-300 text-white py-3 px-6 rounded-xl font-semibold transition-all"
+                                    onClick={handleGoToProjects}
+                                    className="w-full flex items-center justify-center gap-2 bg-industrial-900 hover:bg-black text-white py-3 px-6 rounded-xl font-semibold transition-all"
                                 >
-                                    {isCreatingDemo ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Create Demo Project'}
+                                    <FolderOpen className="w-5 h-5" /> Go to Projects
                                 </button>
                                 <button
                                     onClick={() => setDismissed(true)}

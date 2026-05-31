@@ -11,23 +11,52 @@ import SelectedFaultPanel from '../components/dashboard/SelectedFaultPanel';
 
 import api from '../services/apiClient';
 
+interface UploadInfo {
+    total_rows?: number;
+    dataset_hash?: string;
+    [key: string]: unknown;
+}
+
+interface FaultRow {
+    row_id: string;
+    [key: string]: unknown;
+}
+
+interface AnalysisResult {
+    error_type?: string;
+    message?: string;
+    [key: string]: unknown;
+}
+
+interface SystemStatus {
+    [key: string]: unknown;
+}
+
+interface TelemetryDataset {
+    id: string;
+    file_name: string;
+    file_path: string;
+    row_count: number;
+}
+
 const LogsPage = () => {
     const activeProjectId = useAppStore(s => s.activeProjectId);
     const knowledgeStatus = useAppStore(s => s.knowledgeStatus);
 
-    const [uploadInfo, setUploadInfo] = useState(null);
-    const [summary, setSummary] = useState(null);
-    const [selectedFault, setSelectedFault] = useState(null);
-    const [faultDetail, setFaultDetail] = useState(null);
-    const [analysis, setAnalysis] = useState(null);
-    const [analysisError, setAnalysisError] = useState(null);
+    const [uploadInfo, setUploadInfo] = useState<UploadInfo | null>(null);
+    const [summary, setSummary] = useState<Record<string, unknown> | null>(null);
+    const [selectedFault, setSelectedFault] = useState<FaultRow | null>(null);
+    const [faultDetail, setFaultDetail] = useState<Record<string, unknown> | null>(null);
+    const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+    const [analysisError, setAnalysisError] = useState<AnalysisResult | null>(null);
     const [isUploading, setIsUploading] = useState(false);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
-    const [uploadError, setUploadError] = useState(null);
-    const [systemStatus, setSystemStatus] = useState(null);
-    const [telemetryDatasets, setTelemetryDatasets] = useState([]);
+    const [uploadError, setUploadError] = useState<string | null>(null);
+    const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+    const [telemetryDatasets, setTelemetryDatasets] = useState<TelemetryDataset[]>([]);
     const [selectedDataset, setSelectedDataset] = useState('__upload__');
     const [loadingDataset, setLoadingDataset] = useState(false);
+
 
     // Fetch saved telemetry datasets for the active project
     const fetchTelemetry = useCallback(async () => {
@@ -61,7 +90,7 @@ const LogsPage = () => {
     }, []);
 
     // ── Upload ──────────────────────────────────────────────────────────────────
-    const handleUpload = useCallback(async (file) => {
+    const handleUpload = useCallback(async (file: File) => {
         setIsUploading(true);
         setUploadError(null);
         setSelectedFault(null);
@@ -73,27 +102,28 @@ const LogsPage = () => {
             // Immediately fetch summary
             const s = await faultApi.summary();
             setSummary(s);
-        } catch (err) {
-            setUploadError(err.response?.data?.message || err.message || 'Upload failed');
+        } catch (err: unknown) {
+            const axiosErr = err as { response?: { data?: { message?: string } }; message?: string };
+            setUploadError(axiosErr.response?.data?.message || axiosErr.message || 'Upload failed');
         } finally {
             setIsUploading(false);
         }
     }, []);
 
     // ── Row selection ───────────────────────────────────────────────────────────
-    const handleRowSelect = useCallback(async (row) => {
+    const handleRowSelect = useCallback(async (row: FaultRow) => {
         setSelectedFault(row);
         setAnalysis(null);
         try {
             const detail = await faultApi.detail(row.row_id);
             setFaultDetail(detail);
-        } catch (e) {
+        } catch (e: unknown) {
             console.error('Detail fetch failed', e);
         }
     }, []);
 
     // ── Analysis ────────────────────────────────────────────────────────────────
-    const handleAnalyze = useCallback(async (rowId, datasetHash, question = null) => {
+    const handleAnalyze = useCallback(async (rowId: string, _datasetHash: unknown, question: string | null = null) => {
         setIsAnalyzing(true);
         setAnalysisError(null);
         setAnalysis(null);
@@ -105,14 +135,15 @@ const LogsPage = () => {
             } else {
                 setAnalysis(result);
             }
-        } catch (err) {
-            const errData = err.response?.data;
+        } catch (err: unknown) {
+            const axiosErr = err as { response?: { data?: AnalysisResult }; message?: string };
+            const errData = axiosErr.response?.data;
             if (errData?.error_type) {
                 setAnalysisError(errData);
             } else {
                 setAnalysisError({
                     error_type: 'UNKNOWN_ERROR',
-                    message: err.message || 'Analysis failed — check backend logs.',
+                    message: axiosErr.message || 'Analysis failed — check backend logs.',
                 });
             }
         } finally {

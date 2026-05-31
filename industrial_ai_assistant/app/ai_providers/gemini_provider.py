@@ -50,15 +50,22 @@ class GeminiProvider(AIProvider):
 
             response = model.generate_content(full_prompt)
             
+            raw_text = ""
             try:
                 raw_text = response.text
             except Exception as access_err:
-                # Fallback: check if candidates and parts exist to construct the text
-                if response.candidates and response.candidates[0].content.parts:
-                    raw_text = "".join(part.text for part in response.candidates[0].content.parts if hasattr(part, 'text'))
-                else:
+                # Fallback: collect partial text from candidates (e.g. MAX_TOKENS finish_reason=2)
+                if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                    raw_text = "".join(
+                        part.text for part in response.candidates[0].content.parts
+                        if hasattr(part, 'text') and part.text
+                    ).strip()
+                
+                if not raw_text:
                     finish_reason = response.candidates[0].finish_reason.name if response.candidates else "UNKNOWN"
-                    raise ValueError(f"Gemini returned no text content (finish_reason: {finish_reason}). Error: {access_err}")
+                    raise ValueError(
+                        f"Gemini returned no text content (finish_reason: {finish_reason}). Error: {access_err}"
+                    )
             
             # Note: google.generativeai doesn't easily expose exact token counts in the text response 
             # without additional API calls, so we mock or estimate them if needed.
