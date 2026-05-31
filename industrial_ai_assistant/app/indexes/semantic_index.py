@@ -29,8 +29,7 @@ class SemanticIndex:
     BM25 index is maintained in-process over chunk texts per project.
     """
 
-    def __init__(self, embedder, qdrant_host: str = "127.0.0.1", qdrant_port: int = 6333):
-        self._embedder = embedder
+    def __init__(self, qdrant_host: str = "127.0.0.1", qdrant_port: int = 6333):
         self._host = qdrant_host
         self._port = qdrant_port
         self._client = None
@@ -65,7 +64,7 @@ class SemanticIndex:
 
     # ── Upsert ─────────────────────────────────────────────────────────────────
 
-    def upsert_chunks(self, chunks: list[SemanticChunk], project_id: str, embedder=None) -> int:
+    def upsert_chunks(self, chunks: list[SemanticChunk], project_id: str) -> int:
         """
         Embed and upsert chunks into Qdrant.
         project_id is mandatory — enforced by type signature AND payload.
@@ -78,11 +77,10 @@ class SemanticIndex:
 
         client = self._get_client()
         points = []
-        
-        active_embedder = embedder or self._embedder
+        from app.llm.llm_client import embed_sync
 
         for chunk in chunks:
-            embedding = active_embedder.embed_text(chunk.content)
+            embedding = embed_sync(chunk.content)
             point_id = _chunk_uuid(chunk.chunk_id)
             payload = {
                 "project_id":    project_id,   # MANDATORY — never omit
@@ -111,14 +109,14 @@ class SemanticIndex:
         top_k: int = 5,
         file_type: Optional[str] = None,
         scope_files: set[str] | None = None,
-        embedder=None,
     ) -> list[ScoredChunk]:
         """Pure cosine vector search, filtered by project_id (mandatory)."""
         from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
 
+        from app.llm.llm_client import embed_sync
+
         client = self._get_client()
-        active_embedder = embedder or self._embedder
-        q_emb = active_embedder.embed_text(query)
+        q_emb = embed_sync(query)
 
         must = [FieldCondition(key="project_id", match=MatchValue(value=project_id))]
         if file_type:
@@ -193,7 +191,6 @@ class SemanticIndex:
         top_k: int = 5,
         file_type: Optional[str] = None,
         scope_files: set[str] | None = None,
-        embedder=None,
     ) -> list[ScoredChunk]:
         """
         Reciprocal Rank Fusion of BM25 + vector results.
@@ -205,7 +202,7 @@ class SemanticIndex:
         if project_id not in self._chunk_store or len(self._chunk_store.get(project_id, {})) == 0:
             self.warm_bm25_from_qdrant(project_id)
 
-        vector_hits = self.vector_search(query, project_id, top_k=top_k * 2, file_type=file_type, scope_files=scope_files, embedder=embedder)
+        vector_hits = self.vector_search(query, project_id, top_k=top_k * 2, file_type=file_type, scope_files=scope_files)
         bm25_hits   = self.bm25_search(query, project_id, top_k=top_k * 2, scope_files=scope_files)
 
         rrf: dict[str, float] = {}
@@ -408,11 +405,8 @@ def _hit_to_scored(hit, method: str) -> ScoredChunk:
 _instance: SemanticIndex | None = None
 
 
-def get_semantic_index(embedder=None, host="127.0.0.1", port=6333) -> SemanticIndex:
+def get_semantic_index(host="127.0.0.1", port=6333) -> SemanticIndex:
     global _instance
     if _instance is None:
-        if embedder is None:
-            from app.embeddings.gemini_embedder import GeminiEmbedder
-            embedder = GeminiEmbedder()
-        _instance = SemanticIndex(embedder=embedder, qdrant_host=host, qdrant_port=port)
+        _instance = SemanticIndex(qdrant_host=host, qdrant_port=port)
     return _instance

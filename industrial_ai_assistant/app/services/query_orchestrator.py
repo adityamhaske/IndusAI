@@ -173,10 +173,6 @@ class QueryOrchestrator:
             # ── Step 4: Semantic retrieval (hybrid) ───────────────────────────────
             if intent.semantic_required:
                 try:
-                    embedder = None
-                    if getattr(request, "uid", None):
-                        from app.embeddings.embedder_factory import get_embedder_for_user
-                        embedder = get_embedder_for_user(request.uid)
 
                     search_scope = effective_scope if scope_mode == "STRICT" else None
                     semantic_hits = sem.hybrid_search(
@@ -184,7 +180,6 @@ class QueryOrchestrator:
                         project_id=project_id,
                         top_k=request.top_k * (3 if scope_mode == "PREFER" else 1),
                         scope_files=search_scope,
-                        embedder=embedder,
                     )
                 except Exception as exc:
                     logger.warning("Semantic retrieval failed: %s", exc)
@@ -346,41 +341,57 @@ def _structured_lookup(query: str, intent, si) -> list[StructuredHit]:
 # ── LLM call ─────────────────────────────────────────────────────────────────
 
 def _call_llm(prompt: str, retrieval_coverage_score: float = 0.0) -> str:
-    """Call AIGatewayService.execute(). Returns raw LLM output text.
+    """Call llm_client.generate(). Returns raw LLM output text.
     Raises LLMConnectionError with sanitized user-facing message."""
-    from app.config.dependency_injection import get_container
-    from app.models.ai_models import AIRequest
     from app.core.llm_exceptions import LLMConnectionError
+    import asyncio
+    from app.llm import llm_client
 
-    gateway = get_container().ai_gateway
-    req = AIRequest(prompt=prompt, response_format="json")
-    res = gateway.execute(req, retrieval_coverage_score=retrieval_coverage_score)
-    
-    if not res.success:
-        # Parse the error to produce a provider-specific user-facing message
-        err = res.error or ""
-        provider = res.provider_name or "unknown"
-        logger.error("AIGateway failure [%s]: %s", provider, err)
-        
-        if "PROVIDER_NOT_FOUND" in (res.error_type or ""):
-            user_msg = "No AI provider connected. Please configure a provider in Settings."
-        elif "401" in err or "403" in err or "INVALID_API_KEY" in err or "Unauthorized" in err:
-            user_msg = f"{provider.replace('_', ' ').title()} connection failed: Invalid API key. Check your key in Settings."
+    try:
+        # We need an event loop if this is called from a sync context.
+        # But wait, query() is sync, so _call_llm is sync. 
+        # llm_client.generate is async. We must run it via asyncio.
+        try:
+            loop = asyncio.get_running_loop()
+            # If we are already in an event loop and can't use run_until_complete directly:
+            # But query() itself is sync. Let's see if we are in a threadpool or fastAPI main loop.
+            # If we are in FastAPI sync endpoint, we might not have a running loop in this thread,
+            # or if we do, we can't run_until_complete. Let's just use asyncio.run if no loop,
+            # or run_coroutine_threadsafe if there is a loop. Actually, better yet:
+            # We can use litellm.completion directly for sync.
+            import litellm
+            import os
+            
+            litellm.drop_params = True
+            GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+            
+            # Replicating llm_client.generate logic synchronously
+            response = litellm.completion(
+                model="gemini/gemini-1.5-flash",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=8192,
+                temperature=0.2,
+                api_key=GEMINI_API_KEY,
+            )
+            return response.choices[0].message.content
+
+        except RuntimeError:
+            # No running loop
+            return asyncio.run(llm_client.generate(prompt=prompt))
+            
+    except Exception as e:
+        logger.error("LLM failure: %s", str(e))
+        err = str(e)
+        if "401" in err or "403" in err or "INVALID_API_KEY" in err or "Unauthorized" in err:
+            user_msg = "LLM connection failed: Invalid or missing API key."
         elif "ConnectError" in err or "Connection refused" in err or "not reachable" in err:
-            if "ollama" in provider.lower() or "local" in provider.lower():
-                user_msg = "Ollama is not reachable at localhost:11434. Make sure Ollama is running."
-            else:
-                user_msg = f"{provider.replace('_', ' ').title()} is not reachable. Check your network connection."
+            user_msg = "LLM provider is not reachable. Check your network connection."
         elif "RATE_LIMIT" in err:
             user_msg = "AI service is rate-limited. Please wait a moment and try again."
-        elif "Circuit Breaker" in err:
-            user_msg = "AI service is temporarily paused due to repeated failures. It will recover automatically."
         else:
-            user_msg = f"AI provider '{provider}' returned an error. Please check Settings or try again."
+            user_msg = f"AI provider returned an error: {err}"
         
         raise LLMConnectionError(user_msg)
-        
-    return res.raw_output
 
 
 def _parse_llm_output(raw: str) -> dict:

@@ -39,7 +39,7 @@ async def _run_ingestion_task(job_id: str, project_id: str, uid: str, uploaded_b
             
         try:
             from app.config.dependency_injection import get_container
-            ps = get_container()._project_service
+            ps = get_container().project_service
             ps.upsert_project(
                 uid=uid,
                 project_id=project_id,
@@ -63,7 +63,7 @@ async def _run_ingestion_task(job_id: str, project_id: str, uid: str, uploaded_b
 
         try:
             from app.config.dependency_injection import get_container
-            ps = get_container()._project_service
+            ps = get_container().project_service
             ps.update_index_status(
                 uid=uid,
                 project_id=project_id,
@@ -89,7 +89,7 @@ async def _run_ingestion_task(job_id: str, project_id: str, uid: str, uploaded_b
         }, merge=True)
         try:
             from app.config.dependency_injection import get_container
-            get_container()._project_service.update_index_status(uid, project_id, "OUTDATED")
+            get_container().project_service.update_index_status(uid=uid, project_id=project_id, status="OUTDATED")
         except Exception:
             pass
 

@@ -115,7 +115,7 @@ const Header = ({ title }: { title: string }) => {
     const isHealthLoaded = health !== null;
     const qdrantState = isHealthLoaded ? (qdrantConnected ? 'ready' : 'failed') : (gracePeriod ? 'loading' : 'failed');
 
-    const geminiConnected = health?.status === 'healthy';
+    const geminiConnected = health?.status === 'ok';
     const geminiState = !hasApiKey ? 'no_key' : (isHealthLoaded ? (geminiConnected ? 'ready' : 'failed') : (gracePeriod ? 'loading' : 'failed'));
 
     const loaded = knowledgeStatus?.project_loaded;

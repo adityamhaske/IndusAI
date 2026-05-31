@@ -35,8 +35,6 @@ from app.core.fault_exceptions import (
     DatasetNotLoadedError,
     FaultRowNotFoundError,
 )
-from app.services.ai_gateway import AIGatewayService
-from app.models.ai_models import AIRequest
 from app.core.llm_exceptions import LLMConnectionError, LLMResponseParseError
 from app.models.fault_analysis_models import (
     FaultAnalysisRequest,
@@ -122,13 +120,11 @@ class FaultAnalysisOrchestrator:
 
     def __init__(
         self,
-        llm: AIGatewayService,
         rag_service: RAGService,
         validator: FaultResponseValidator,
         fault_service: Optional[FaultService] = None,
         health_service=None,   # Optional injection for testing
     ):
-        self._llm = llm
         self._rag = rag_service
         self._validator = validator
         self._fault_svc = fault_service or get_fault_service()
@@ -438,41 +434,54 @@ class FaultAnalysisOrchestrator:
         Raises LLMConnectionError on timeout/connection failure.
         Returns (parsed_output, is_fallback, raw_output). parsed_output is None if validations fail.
         """
+        from app.llm import llm_client
+        
         last_exc = None
         raw_out = ""
         for attempt in range(max_retries + 1):
             t0 = time.perf_counter()
-            req = AIRequest(
-                prompt=prompt,
-                response_format="json",
-                json_schema=schema_model.schema(),
-                intent_type=intent_type
-            )
-            res = self._llm.execute(req, retrieval_coverage_score=retrieval_coverage_score, retrieval_chunk_count=retrieval_chunk_count)
-            raw_out = res.raw_output
-            
-            logger.debug("LLM attempt %d raw response (%.0fms): %s",
-                         attempt + 1, (time.perf_counter() - t0) * 1000, res.raw_output[:120])
-                         
-            if res.success and res.parsed_output:
-                try:
-                    parsed = schema_model(**res.parsed_output)
+            try:
+                raw_out = llm_client.generate_sync(
+                    prompt=prompt,
+                    system_prompt=None,
+                    max_tokens=8192
+                )
+                
+                logger.debug("LLM attempt %d raw response (%.0fms): %s",
+                             attempt + 1, (time.perf_counter() - t0) * 1000, raw_out[:120])
+                             
+                parsed = _parse_llm_json(raw_out)
+                # Phase 13 Item 3: Low-Quality Output Detection
+                if hasattr(parsed, "diagnosis") and len(parsed.diagnosis.strip()) < 10:
+                    raise ValueError("LowQualityOutput: diagnosis is anomalously short.")
+                
+                # Check type
+                if isinstance(parsed, StructuredLLMOutput) and schema_model == FlexibleLLMOutput:
+                    pass # Or handle properly if we want flexible, but our parsing tries both or just structured first.
+                
+                # We can just return it, though we might want to cast it.
+                # Actually _parse_llm_json returns StructuredLLMOutput.
+                # We can do `schema_model(**parsed.model_dump())` or just rely on what we have.
+                if schema_model == FlexibleLLMOutput:
+                    # Actually _parse_llm_json is hardcoded to StructuredLLMOutput right now. Let's fix that below.
+                    parsed_dict = json.loads(re.search(r"\{.*\}", raw_out, re.DOTALL).group())
+                    parsed = schema_model(**parsed_dict)
+                else:
+                    parsed = schema_model(**parsed.model_dump())
                     
-                    # Phase 13 Item 3: Low-Quality Output Detection
-                    if hasattr(parsed, "diagnosis") and len(parsed.diagnosis.strip()) < 10:
-                        raise ValueError("LowQualityOutput: diagnosis is anomalously short.")
+                return parsed, False, raw_out
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("LLM attempt %d/%d execute/validation failed: %s", attempt + 1, max_retries + 1, exc)
+                if "401" in str(exc) or "403" in str(exc) or "INVALID_API_KEY" in str(exc) or "Unauthorized" in str(exc):
+                    raise LLMConnectionError("LLM connection failed: Invalid or missing API key.")
+                if "ConnectError" in str(exc) or "Connection refused" in str(exc) or "not reachable" in str(exc):
+                    raise LLMConnectionError("LLM provider is not reachable. Check your network connection.")
+                if "RATE_LIMIT" in str(exc):
+                    raise LLMConnectionError("AI service is rate-limited. Please wait a moment and try again.")
                     
-                    return parsed, False, raw_out
-                except Exception as exc:
-                    last_exc = exc
-                    logger.warning("LLM attempt %d/%d validation failed: %s", attempt + 1, max_retries + 1, exc)
-                    if attempt < max_retries:
-                        prompt += "\n\nSYSTEM WARNING: Your previous output was malformed or generated insufficient content. Ensure you provide a comprehensive and properly formatted JSON response matching the schema exactly."
-            else:
-                if res.error_type in ["CONNECTION", "TIMEOUT"]:
-                    raise LLMConnectionError(f"Gateway Error: {res.error}")
-                last_exc = res.error
-                logger.warning("LLM attempt %d/%d execute failed: %s", attempt + 1, max_retries + 1, res.error)
+                if attempt < max_retries:
+                    prompt += "\n\nSYSTEM WARNING: Your previous output was malformed or generated insufficient content. Ensure you provide a comprehensive and properly formatted JSON response matching the schema exactly."
 
         logger.error("LLM failed to return valid JSON. Degrading to raw text. Last Error: %s", last_exc)
         return None, False, raw_out

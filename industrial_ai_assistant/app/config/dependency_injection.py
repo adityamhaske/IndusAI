@@ -49,11 +49,7 @@ class Container:
         # 1. Firestore (replaces SQLite)
         self._db = get_firestore()
 
-        # 2. Default Embedder — will be overridden per-user in Phase 3 (BYOK)
-        from app.embeddings.gemini_embedder import GeminiEmbedder
-        self._embedder = GeminiEmbedder()
-
-        # 3. Vector Store (Qdrant Cloud — shared connection, per-user collections)
+        # 2. Vector Store (Qdrant Cloud — shared connection, per-user collections)
         if settings.QDRANT_URL:
             self._vector_store = QdrantStore(
                 url=settings.QDRANT_URL,
@@ -68,19 +64,11 @@ class Container:
         self._keyword_retriever = KeywordSearch()
         self._reranker = Reranker()
 
-        if self._vector_store and self._embedder:
-            self._retriever = HybridRetriever(
-                vector_store=self._vector_store,
-                embedder=self._embedder,
-                keyword_retriever=self._keyword_retriever,
-                reranker=self._reranker,
-            )
-        else:
-            self._retriever = HybridRetriever(
-                vector_store=self._vector_store,
-                embedder=self._embedder,
-                keyword_retriever=self._keyword_retriever,
-            )
+        self._retriever = HybridRetriever(
+            vector_store=self._vector_store,
+            keyword_retriever=self._keyword_retriever,
+            reranker=self._reranker,
+        )
 
         # 5. Services (Firestore-backed)
         self._validator = ValidationService()
@@ -99,48 +87,15 @@ class Container:
         self._rag_service = RAGService(retriever=self._retriever)
         self._fault_response_validator = FaultResponseValidator()
 
-        # AI Gateway will be initialized lazily per-user in Phase 3.
-        # For now, keep a default gateway for backward compatibility.
-        self._llm_gateway = None
-        self._fault_orchestrator = None
-
-    def _ensure_gateway(self):
-        """Lazy-init a default AI gateway for backward compat during Phase 2."""
-        if self._llm_gateway is None:
-            from app.services.ai_gateway import AIGatewayService, FallbackPolicy
-            from app.ai_providers.gemini_provider import GeminiProvider
-            import os
-            
-            providers = {}
-            gemini_key = os.getenv("GEMINI_API_KEY", "")
-            if gemini_key:
-                providers["gemini"] = GeminiProvider(api_key=gemini_key)
-            
-            policy = FallbackPolicy(
-                primary="gemini",
-                secondary=None,
-                timeout_ms=8000,
-                json_enforced=True,
-            )
-            self._llm_gateway = AIGatewayService(
-                providers=providers,
-                fallback_policy=policy,
-            )
-            self._fault_orchestrator = FaultAnalysisOrchestrator(
-                llm=self._llm_gateway,
-                rag_service=self._rag_service,
-                validator=self._fault_response_validator,
-            )
+        self._fault_orchestrator = FaultAnalysisOrchestrator(
+            rag_service=self._rag_service,
+            validator=self._fault_response_validator,
+        )
 
     # Accessors
     @property
     def firestore(self) -> FirestoreClient:
         return self._db
-
-    @property
-    def ai_gateway(self):
-        self._ensure_gateway()
-        return self._llm_gateway
 
     @property
     def history_service(self) -> HistoryService:
@@ -152,7 +107,6 @@ class Container:
 
     @property
     def fault_orchestrator(self) -> FaultAnalysisOrchestrator:
-        self._ensure_gateway()
         return self._fault_orchestrator
 
     @property
@@ -162,10 +116,6 @@ class Container:
     @property
     def vector_store(self):
         return self._vector_store
-
-    @property
-    def embedder(self):
-        return self._embedder
 
 
 # Singleton instance

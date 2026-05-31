@@ -3,7 +3,6 @@ import time
 import json
 import logging
 from pathlib import Path
-from google import genai
 from typing import List
 from app.core.schemas import DocumentChunk, ChunkMetadata
 from app.core.interfaces.chunker_interface import ChunkerInterface
@@ -16,79 +15,28 @@ class PDFProcessor:
         self.api_key = api_key
         
     def process(self, file_bytes: bytes, filename: str) -> List[DocumentChunk]:
-        if not self.api_key:
-            logger.error("GEMINI_API_KEY is missing")
-            raise ValueError("API key is required to process PDFs")
-            
-        client = genai.Client(api_key=self.api_key)
+        import pdfplumber
+        import io
         
-        logger.info(f"Uploading {filename} to Gemini...")
-        
-        # Write bytes to temp file because upload_file needs a path or fd
-        import tempfile
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(file_bytes)
-            tmp_path = tmp.name
-            
+        logger.info(f"Extracting {filename} via pdfplumber...")
+        full_text = []
         try:
-            uploaded_file = client.files.upload(file=tmp_path, config={'display_name': Path(filename).name})
-        finally:
-            os.unlink(tmp_path)
-        
-        MAX_WAIT_SECONDS = 30
-        POLL_INTERVAL = 2
-        elapsed = 0
-        while uploaded_file.state.name == "PROCESSING":
-            if elapsed >= MAX_WAIT_SECONDS:
-                raise TimeoutError(f"Gemini file never became ACTIVE: {uploaded_file.name}")
-            logger.info("Waiting for PDF to be processed by Gemini...")
-            time.sleep(POLL_INTERVAL)
-            elapsed += POLL_INTERVAL
-            uploaded_file = client.files.get(name=uploaded_file.name)
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        full_text.append(page_text)
+        except Exception as e:
+            logger.error(f"Failed to parse PDF {filename}: {e}")
+            raise ValueError(f"Failed to parse PDF {filename}: {e}")
             
-        if uploaded_file.state.name == "FAILED":
-            client.files.delete(name=uploaded_file.name)
-            raise RuntimeError("Gemini failed to process the PDF.")
+        combined_text = "\n\n".join(full_text)
+        if not combined_text.strip():
+            logger.warning("Extracted empty text from PDF")
+            return []
             
-        logger.info("Extracting chunks via Gemini...")
-        prompt = (
-            "Analyze this document. Extract the text and break it down into logical, coherent paragraphs or sections "
-            "suitable for a vector database. Return ONLY a valid JSON array of strings, where each string represents a chunk of text. "
-            "Do not include any markdown formatting or code blocks."
-        )
-        
-        response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=[uploaded_file, prompt],
-            config=genai.types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
-        )
-        
-        try:
-            raw_text = response.text or ""
-            if not raw_text.strip():
-                raise ValueError("Empty response from Gemini")
-        except Exception as access_err:
-            finish_reason = getattr(response.candidates[0].finish_reason, "name", str(response.candidates[0].finish_reason)) if response.candidates else "UNKNOWN"
-            raise ValueError(f"Gemini returned no text content for PDF (finish_reason: {finish_reason}). Error: {access_err}")
-            
-        try:
-            chunks_text = json.loads(raw_text.strip())
-        except json.JSONDecodeError:
-            logger.warning("Failed to decode JSON from Gemini, falling back to raw text")
-            chunks_text = [raw_text.strip()]
-            
-        client.files.delete(name=uploaded_file.name)
-        
-        chunks = []
-        for text_chunk in chunks_text:
-            if not isinstance(text_chunk, str) or not text_chunk.strip():
-                continue
-            metadata = ChunkMetadata(source_file=filename, chunk_id="")
-            chunks.extend(self.chunker.chunk_text(text_chunk.strip(), metadata))
-            
-        return chunks
+        metadata = ChunkMetadata(source_file=filename, chunk_id="")
+        return self.chunker.chunk_text(combined_text, metadata)
 
 class TextProcessor:
     def __init__(self, chunker: ChunkerInterface):

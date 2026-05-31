@@ -7,7 +7,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { type User } from 'firebase/auth';
 import { onAuthChange, signInWithGoogle, signInWithEmail, signOut, getIdToken } from '../services/auth';
-import { useUserSettings } from '../hooks/useUserSettings';
 
 interface AuthContextValue {
   user: User | null;
@@ -17,7 +16,6 @@ interface AuthContextValue {
   signInEmail: (email: string, password: string) => Promise<void>;
   logOut: () => Promise<void>;
   getToken: () => Promise<string | null>;
-  refreshSettings: () => Promise<any>;
 }
 
 const AuthContext = createContext<AuthContextValue>({
@@ -28,18 +26,15 @@ const AuthContext = createContext<AuthContextValue>({
   signInEmail: async () => {},
   logOut: async () => {},
   getToken: async () => null,
-  refreshSettings: async () => {},
 });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loadingAuth, setLoadingAuth] = useState(true);
   
-  const { settings, loading: loadingSettings, refreshSettings } = useUserSettings(user?.uid);
-  const hasApiKey = !!settings?.gemini_api_key || !!settings?.has_api_key || !!settings?.has_llm_key;
+  const hasApiKey = true; // Centralized API key
   
-  // Overall loading is true if auth is loading, or if we have a user but settings are still loading
-  const loading = loadingAuth || (!!user && loadingSettings);
+  const loading = loadingAuth;
 
   useEffect(() => {
     const unsub = onAuthChange((u) => {
@@ -66,7 +61,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, hasApiKey, signIn, signInEmail: signInEmailFn, logOut, getToken, refreshSettings }}>
+    <AuthContext.Provider value={{ user, loading, hasApiKey, signIn, signInEmail: signInEmailFn, logOut, getToken }}>
       {children}
     </AuthContext.Provider>
   );

@@ -12,7 +12,7 @@ from app.core.firebase import get_storage_bucket
 from app.chunking.semantic_chunker import SemanticChunker
 from app.ingestion.processors import PDFProcessor, L5XProcessor, ExcelProcessor
 from app.vector_store.qdrant_store import user_collection_name
-from app.services.user_settings_service import UserSettingsService
+from app.vector_store.qdrant_store import user_collection_name
 
 logger = logging.getLogger(__name__)
 
@@ -45,17 +45,11 @@ class ProjectIngestionPipeline:
         container = get_container()
         qdrant_store = container._vector_store
 
-        from app.embeddings.embedder_factory import get_embedder_for_user
-        embedder = get_embedder_for_user(uid)
-
-        svc = UserSettingsService()
-        api_key = svc.get_raw_key(uid, "llm_api_key_enc") or ""
-
         from app.ingestion.processors import PDFProcessor, L5XProcessor, ExcelProcessor, TextProcessor
         
         chunker = SemanticChunker()
         processors = {
-            "pdf": PDFProcessor(chunker=chunker, api_key=api_key),
+            "pdf": PDFProcessor(chunker=chunker, api_key=""),
             "l5x": L5XProcessor(chunker=chunker),
             "xlsx": ExcelProcessor(chunker=chunker),
             "xls": ExcelProcessor(chunker=chunker),
@@ -182,8 +176,10 @@ class ProjectIngestionPipeline:
                     result.files_skipped += 1
                     continue
 
-                if chunks and embedder and qdrant_store:
-                    embeddings = embedder.embed_batch([c.content for c in chunks])
+                if chunks and qdrant_store:
+                    from app.llm import llm_client
+                    embeddings = await llm_client.embed_batch([c.content for c in chunks])
+                        
                     for chunk, emb in zip(chunks, embeddings):
                         chunk.embedding = emb
 
