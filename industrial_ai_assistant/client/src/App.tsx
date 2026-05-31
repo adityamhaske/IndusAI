@@ -72,6 +72,31 @@ function ProtectedApp() {
     )
 }
 
+/**
+ * Wraps public routes (landing, login).
+ * If logged in, redirects to the app dashboard.
+ */
+function PublicRoute({ children }: { children: React.ReactNode }) {
+    const { user, loading } = useAuth()
+
+    if (loading) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-industrial-50">
+                <div className="flex flex-col items-center gap-3 text-industrial-500">
+                    <Loader2 className="w-8 h-8 animate-spin" />
+                    <p className="text-sm font-medium">Loading ControlsAI…</p>
+                </div>
+            </div>
+        )
+    }
+
+    if (user) {
+        return <Navigate to="/app/chat" replace />
+    }
+
+    return <>{children}</>
+}
+
 function App() {
     return (
         <AuthProvider>
@@ -79,8 +104,8 @@ function App() {
             <Router>
                 <Routes>
                     {/* Public routes */}
-                    <Route path="/" element={<LandingPage />} />
-                    <Route path="/login" element={<LoginPage />} />
+                    <Route path="/" element={<PublicRoute><LandingPage /></PublicRoute>} />
+                    <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
 
                     {/* Authenticated app routes */}
                     <Route path="/app/*" element={<ProtectedApp />} />

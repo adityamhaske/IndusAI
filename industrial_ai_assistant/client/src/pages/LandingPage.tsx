@@ -2,9 +2,9 @@
  * LandingPage.tsx — Public marketing page for ControlsAI.
  * Shows to all visitors before login.
  */
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Cpu, ArrowRight, Sun, Moon, CheckCircle, Layers, Lock, Server } from 'lucide-react';
+import { Cpu, ArrowRight, CheckCircle, Layers, Lock, Server } from 'lucide-react';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface FeatureCard {
@@ -33,16 +33,6 @@ const Card = ({ card }: { card: FeatureCard }) => (
 // ── Landing Page ───────────────────────────────────────────────────────────────
 export default function LandingPage() {
     const navigate = useNavigate();
-    const [dark, setDark] = useState(false);
-
-    useEffect(() => {
-        if (dark) {
-            document.documentElement.classList.add('dark');
-        } else {
-            document.documentElement.classList.remove('dark');
-        }
-        return () => document.documentElement.classList.remove('dark');
-    }, [dark]);
 
     const features: FeatureCard[] = [
         {
@@ -91,14 +81,6 @@ export default function LandingPage() {
 
                     {/* Right actions */}
                     <div className="flex items-center gap-3">
-                        <button
-                            id="btn-theme-toggle"
-                            onClick={() => setDark(d => !d)}
-                            className="p-2 rounded-lg text-[#64748B] hover:bg-[#F1F5F9] transition-colors"
-                            aria-label="Toggle theme"
-                        >
-                            {dark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-                        </button>
                         <Link
                             id="btn-open-app"
                             to="/login"
