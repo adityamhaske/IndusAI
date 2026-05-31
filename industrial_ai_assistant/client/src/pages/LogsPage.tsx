@@ -187,7 +187,7 @@ const LogsPage = () => {
                 <p className="text-industrial-500 max-w-md mb-8 leading-relaxed">
                     To start analyzing PLC logic, P&IDs, and fault logs, you need to load an active project workspace.
                 </p>
-                <Link to="/project" className="bg-industrial-900 hover:bg-black text-white font-semibold py-3 px-6 rounded-xl transition-all shadow-sm flex items-center gap-2">
+                <Link to="/app/project" className="bg-industrial-900 hover:bg-black text-white font-semibold py-3 px-6 rounded-xl transition-all shadow-sm flex items-center gap-2">
                     <FolderOpen className="w-4 h-4" /> Go to Projects
                 </Link>
             </div>

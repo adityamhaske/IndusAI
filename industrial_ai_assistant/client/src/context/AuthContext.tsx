@@ -6,7 +6,7 @@
  */
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { type User } from 'firebase/auth';
-import { onAuthChange, signInWithGoogle, signOut, getIdToken } from '../services/auth';
+import { onAuthChange, signInWithGoogle, signInWithEmail, signOut, getIdToken } from '../services/auth';
 import { useUserSettings } from '../hooks/useUserSettings';
 
 interface AuthContextValue {
@@ -14,6 +14,7 @@ interface AuthContextValue {
   loading: boolean;
   hasApiKey: boolean;
   signIn: () => Promise<void>;
+  signInEmail: (email: string, password: string) => Promise<void>;
   logOut: () => Promise<void>;
   getToken: () => Promise<string | null>;
   refreshSettings: () => Promise<any>;
@@ -24,6 +25,7 @@ const AuthContext = createContext<AuthContextValue>({
   loading: true,
   hasApiKey: false,
   signIn: async () => {},
+  signInEmail: async () => {},
   logOut: async () => {},
   getToken: async () => null,
   refreshSettings: async () => {},
@@ -51,6 +53,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await signInWithGoogle();
   };
 
+  const signInEmailFn = async (email: string, password: string) => {
+    await signInWithEmail(email, password);
+  };
+
   const logOut = async () => {
     await signOut();
   };
@@ -60,7 +66,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, hasApiKey, signIn, logOut, getToken, refreshSettings }}>
+    <AuthContext.Provider value={{ user, loading, hasApiKey, signIn, signInEmail: signInEmailFn, logOut, getToken, refreshSettings }}>
       {children}
     </AuthContext.Provider>
   );

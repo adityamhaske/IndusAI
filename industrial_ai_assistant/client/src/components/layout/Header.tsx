@@ -273,7 +273,7 @@ const Header = ({ title }: { title: string }) => {
                                         </p>
                                     </div>
                                     <div className="p-1.5">
-                                        <a href="/settings" onClick={() => setShowUserMenu(false)} className="block px-3 py-2 text-sm text-industrial-700 hover:bg-industrial-50 rounded-lg">
+                                        <a href="/app/settings" onClick={() => setShowUserMenu(false)} className="block px-3 py-2 text-sm text-industrial-700 hover:bg-industrial-50 rounded-lg">
                                             Settings
                                         </a>
                                         <button 

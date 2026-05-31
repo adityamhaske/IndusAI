@@ -1,5 +1,5 @@
 /**
- * useAppStore.ts — Global Zustand store for IndusAI.
+ * useAppStore.ts — Global Zustand store for ControlsAI.
  *
  * Project-scoped: each project has its own chat, faults, and analysis state.
  * Persists to localStorage on every write.

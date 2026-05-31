@@ -41,7 +41,7 @@ const KnowledgeBadge = ({ status }: { status: KnowledgeStatus | null }) => {
         <div className="flex items-center gap-2 text-xs bg-yellow-50 border border-yellow-200 text-yellow-700 px-3 py-1.5 rounded-full font-medium">
             <span className="w-2 h-2 rounded-full bg-yellow-500" />
             General Documentation Mode —{' '}
-            <Link to="/project" className="underline hover:text-yellow-800">Index a project</Link>
+            <Link to="/app/project" className="underline hover:text-yellow-800">Index a project</Link>
         </div>
     );
 };
@@ -257,7 +257,7 @@ const ChatPage = () => {
                 <p className="text-industrial-500 max-w-md mb-8 leading-relaxed">
                     To start asking questions about your PLC logic, P&IDs, and fault logs, you need to load an active project workspace.
                 </p>
-                <Link to="/project" className="bg-industrial-900 hover:bg-black text-white font-semibold py-3 px-6 rounded-xl transition-all shadow-sm flex items-center gap-2">
+                <Link to="/app/project" className="bg-industrial-900 hover:bg-black text-white font-semibold py-3 px-6 rounded-xl transition-all shadow-sm flex items-center gap-2">
                     <FolderOpen className="w-4 h-4" /> Go to Projects
                 </Link>
             </div>
@@ -283,7 +283,7 @@ const ChatPage = () => {
                                         <p className="text-sm text-industrial-700 leading-relaxed">
                                             Hello. Ask me anything about your PLC system — tags, routines, IO maps, fault logic, or commissioning status.
                                             {!knowledgeStatus?.project_loaded && (
-                                                <span className="text-yellow-600"> Index a project folder in <a href="/settings" className="underline hover:text-yellow-800">Settings</a> for project-level answers.</span>
+                                                <span className="text-yellow-600"> Index a project folder in <Link to="/app/settings" className="underline hover:text-yellow-800">Settings</Link> for project-level answers.</span>
                                             )}
                                         </p>
                                     </div>

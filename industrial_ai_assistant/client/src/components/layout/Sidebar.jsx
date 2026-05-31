@@ -1,17 +1,17 @@
 import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { MessageSquare, FileText, History, Settings, Box, PlusCircle } from 'lucide-react';
+import { MessageSquare, FileText, History, Settings, Box, PlusCircle, Cpu } from 'lucide-react';
 import useAppStore from '../../store/useAppStore';
 
 const Sidebar = () => {
     const navigate = useNavigate();
     const resetChatSession = useAppStore(s => s.resetChatSession);
     const navItems = [
-        { to: '/chat', icon: MessageSquare, label: 'Chat Assistant' },
-        { to: '/logs', icon: FileText, label: 'PLC Logs' },
-        { to: '/history', icon: History, label: 'History' },
-        { to: '/project', icon: Box, label: 'Project Info' },
-        { to: '/settings', icon: Settings, label: 'Settings' },
+        { to: '/app/chat', icon: MessageSquare, label: 'Chat Assistant' },
+        { to: '/app/logs', icon: FileText, label: 'PLC Logs' },
+        { to: '/app/history', icon: History, label: 'History' },
+        { to: '/app/project', icon: Box, label: 'Project Info' },
+        { to: '/app/settings', icon: Settings, label: 'Settings' },
     ];
 
     return (
@@ -19,8 +19,8 @@ const Sidebar = () => {
             {/* Logo Area */}
             <div className="h-16 flex items-center px-6 border-b border-industrial-100">
                 <div className="flex items-center gap-2 text-industrial-900">
-                    <Box className="w-6 h-6 text-primary-600" />
-                    <span className="font-bold text-lg tracking-tight">IndusAI</span>
+                    <Cpu className="w-5 h-5 text-primary-600" />
+                    <span className="font-bold text-lg tracking-tight">ControlsAI</span>
                 </div>
             </div>
 
@@ -38,7 +38,7 @@ const Sidebar = () => {
                             }`
                         }
                     >
-                        <item.icon className={`w-5 h-5 transition-colors ${({ isActive }) => isActive ? 'text-primary-600' : 'text-industrial-400 group-hover:text-industrial-600'}`} />
+                        <item.icon className="w-5 h-5 text-industrial-400 group-hover:text-industrial-600" />
                         {item.label}
                     </NavLink>
                 ))}
@@ -49,7 +49,7 @@ const Sidebar = () => {
                 <button
                     onClick={() => {
                         resetChatSession();
-                        navigate('/chat');
+                        navigate('/app/chat');
                     }}
                     className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white py-2.5 px-4 rounded-lg font-medium transition-colors shadow-sm text-sm"
                 >

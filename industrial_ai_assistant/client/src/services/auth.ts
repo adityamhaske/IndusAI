@@ -1,12 +1,12 @@
 /**
  * auth.ts — Firebase Authentication helpers.
  *
- * Provides sign-in (Google), sign-out, and token retrieval.
- * Microsoft sign-in is stubbed for future use.
+ * Provides sign-in (Google + Email/Password), sign-out, and token retrieval.
  */
 import {
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithEmailAndPassword,
   signOut as fbSignOut,
   onAuthStateChanged,
   type User,
@@ -18,6 +18,12 @@ const googleProvider = new GoogleAuthProvider();
 /** Sign in with Google popup. Returns the Firebase User. */
 export async function signInWithGoogle(): Promise<User> {
   const result = await signInWithPopup(firebaseAuth, googleProvider);
+  return result.user;
+}
+
+/** Sign in with email + password. Returns the Firebase User. */
+export async function signInWithEmail(email: string, password: string): Promise<User> {
+  const result = await signInWithEmailAndPassword(firebaseAuth, email, password);
   return result.user;
 }
 

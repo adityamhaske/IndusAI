@@ -38,10 +38,10 @@ const HelpPanel = () => {
                     <section>
                         <h3 className="text-base font-semibold text-industrial-900 mb-3 flex items-center gap-2">
                             <MessageSquare className="w-4 h-4 text-industrial-500" />
-                            Chatting with IndusAI
+                            Chatting with ControlsAI
                         </h3>
                         <p className="mb-3 leading-relaxed">
-                            IndusAI can answer complex questions about your PLC logic. Try asking things like:
+                            ControlsAI can answer complex questions about your PLC logic. Try asking things like:
                         </p>
                         <ul className="list-disc pl-5 space-y-2 text-industrial-600">
                             <li>"What are the interlocks for PUMP_101?"</li>
@@ -57,7 +57,7 @@ const HelpPanel = () => {
                         </h3>
                         <p className="mb-3 leading-relaxed">
                             Navigate to the <strong>PLC Logs</strong> tab to upload SCADA exports or telemetry data. 
-                            IndusAI will correlate faults with your control logic to find the root cause.
+                            ControlsAI will correlate faults with your control logic to find the root cause.
                         </p>
                     </section>
 
@@ -67,13 +67,13 @@ const HelpPanel = () => {
                             Projects & Indexing
                         </h3>
                         <p className="mb-3 leading-relaxed">
-                            Go to <strong>Project Info</strong> to upload your L5X, PDF, or DXF files. IndusAI embeds these files into a vector database so it can reference them when answering.
+                            Go to <strong>Project Info</strong> to upload your L5X, PDF, or DXF files. ControlsAI embeds these files into a vector database so it can reference them when answering.
                         </p>
                     </section>
                 </div>
                 
                 <div className="p-5 border-t border-industrial-100 bg-industrial-50 text-xs text-industrial-500 text-center">
-                    IndusAI Assistant v1.0
+                    ControlsAI v0.1.0
                 </div>
             </div>
         </div>

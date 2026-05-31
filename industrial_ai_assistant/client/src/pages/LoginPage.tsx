@@ -1,26 +1,52 @@
 /**
- * LoginPage.tsx — Sign-in screen with Google auth and IndusAI branding.
+ * LoginPage.tsx — Sign-in screen with Google and email/password auth.
  */
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { Cpu, Loader2 } from 'lucide-react';
+import { Cpu, Loader2, Mail, Lock, ArrowRight } from 'lucide-react';
+import { Link } from 'react-router-dom';
 
 export default function LoginPage() {
-  const { signIn } = useAuth();
-  const [loading, setLoading] = useState(false);
+  const { signIn, signInEmail } = useAuth();
+
+  // Google
+  const [googleLoading, setGoogleLoading] = useState(false);
+
+  // Email/Password
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [emailLoading, setEmailLoading] = useState(false);
+
   const [error, setError] = useState('');
 
   const handleGoogleSignIn = async () => {
-    setLoading(true);
+    setGoogleLoading(true);
     setError('');
     try {
       await signIn();
-    } catch (err: any) {
-      setError(err.message || 'Sign-in failed. Please try again.');
+    } catch {
+      setError('Sign-in failed. Please try again.');
     } finally {
-      setLoading(false);
+      setGoogleLoading(false);
     }
   };
+
+  const handleEmailSignIn = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email.trim() || !password) return;
+    setEmailLoading(true);
+    setError('');
+    try {
+      await signInEmail(email.trim(), password);
+    } catch {
+      // Never reveal whether the email or password is wrong
+      setError('Invalid email or password.');
+    } finally {
+      setEmailLoading(false);
+    }
+  };
+
+  const anyLoading = googleLoading || emailLoading;
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-industrial-50 via-white to-primary-50">
@@ -30,12 +56,12 @@ export default function LoginPage() {
           <div className="inline-flex items-center justify-center w-16 h-16 bg-industrial-900 rounded-2xl mb-4 shadow-lg">
             <Cpu className="w-8 h-8 text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-industrial-900">IndusAI</h1>
-          <p className="text-sm text-industrial-500 mt-1">Industrial Intelligence Assistant</p>
+          <h1 className="text-2xl font-bold text-industrial-900">ControlsAI</h1>
+          <p className="text-sm text-industrial-500 mt-1">Verified Diagnostics · Factory Intelligence</p>
         </div>
 
         {/* Sign-In Card */}
-        <div className="bg-white rounded-2xl border border-industrial-200 shadow-sm p-8 space-y-6">
+        <div className="bg-white rounded-2xl border border-industrial-200 shadow-sm p-8 space-y-5">
           <div className="text-center">
             <h2 className="text-lg font-bold text-industrial-800">Welcome Back</h2>
             <p className="text-xs text-industrial-400 mt-1">Sign in to access your projects</p>
@@ -47,12 +73,14 @@ export default function LoginPage() {
             </div>
           )}
 
+          {/* Google Sign-In */}
           <button
+            id="btn-google-signin"
             onClick={handleGoogleSignIn}
-            disabled={loading}
+            disabled={anyLoading}
             className="w-full flex items-center justify-center gap-3 px-4 py-3 bg-white border border-industrial-300 rounded-xl text-sm font-semibold text-industrial-700 hover:bg-industrial-50 hover:border-industrial-400 disabled:opacity-50 transition-all shadow-sm"
           >
-            {loading ? (
+            {googleLoading ? (
               <Loader2 className="w-5 h-5 animate-spin" />
             ) : (
               <svg className="w-5 h-5" viewBox="0 0 24 24">
@@ -62,19 +90,66 @@ export default function LoginPage() {
                 <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
               </svg>
             )}
-            {loading ? 'Signing in…' : 'Continue with Google'}
+            {googleLoading ? 'Signing in…' : 'Continue with Google'}
           </button>
 
-          {/* Microsoft placeholder */}
-          {/*
-          <button className="w-full flex items-center justify-center gap-3 px-4 py-3 bg-white border border-industrial-300 rounded-xl text-sm font-semibold text-industrial-700">
-            Continue with Microsoft
-          </button>
-          */}
+          {/* Divider */}
+          <div className="flex items-center gap-3">
+            <div className="flex-1 h-px bg-industrial-200" />
+            <span className="text-xs text-industrial-400 font-medium">or</span>
+            <div className="flex-1 h-px bg-industrial-200" />
+          </div>
+
+          {/* Email / Password Form */}
+          <form onSubmit={handleEmailSignIn} className="space-y-3">
+            <div className="relative">
+              <Mail className="w-4 h-4 text-industrial-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                id="input-email"
+                type="email"
+                autoComplete="email"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                placeholder="Email address"
+                required
+                disabled={anyLoading}
+                className="w-full pl-10 pr-4 py-2.5 border border-industrial-200 rounded-xl text-sm text-industrial-800 placeholder-industrial-300 focus:outline-none focus:border-primary-400 focus:ring-1 focus:ring-primary-200 disabled:opacity-50 bg-white"
+              />
+            </div>
+
+            <div className="relative">
+              <Lock className="w-4 h-4 text-industrial-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                id="input-password"
+                type="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                placeholder="Password"
+                required
+                disabled={anyLoading}
+                className="w-full pl-10 pr-4 py-2.5 border border-industrial-200 rounded-xl text-sm text-industrial-800 placeholder-industrial-300 focus:outline-none focus:border-primary-400 focus:ring-1 focus:ring-primary-200 disabled:opacity-50 bg-white"
+              />
+            </div>
+
+            <button
+              id="btn-email-signin"
+              type="submit"
+              disabled={anyLoading || !email.trim() || !password}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-industrial-900 text-white rounded-xl text-sm font-semibold hover:bg-black disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+            >
+              {emailLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
+              {emailLoading ? 'Signing in…' : 'Sign In'}
+            </button>
+          </form>
         </div>
 
         <p className="text-xs text-industrial-400 text-center mt-6">
           Secured by Firebase Authentication
+        </p>
+
+        <p className="text-xs text-industrial-400 text-center mt-2">
+          <Link to="/" className="hover:text-industrial-600 underline underline-offset-2">← Back to home</Link>
         </p>
       </div>
     </div>

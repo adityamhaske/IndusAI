@@ -34,7 +34,7 @@ export const OnboardingWizard = () => {
 
     const handleGoToProjects = () => {
         setDismissed(true);
-        navigate('/project');
+        navigate('/app/project');
     };
 
     return (
@@ -50,7 +50,7 @@ export const OnboardingWizard = () => {
                             <div className="w-16 h-16 bg-primary-50 text-primary-600 rounded-full flex items-center justify-center mx-auto mb-6">
                                 <Sparkles className="w-8 h-8" />
                             </div>
-                            <h2 className="text-2xl font-bold text-industrial-900 mb-4">Welcome to IndusAI</h2>
+                            <h2 className="text-2xl font-bold text-industrial-900 mb-4">Welcome to ControlsAI</h2>
                             <p className="text-industrial-600 mb-8 leading-relaxed">
                                 Your personal industrial AI assistant. Before we get started analyzing logs and P&IDs, you need to configure your Gemini API key.
                             </p>
