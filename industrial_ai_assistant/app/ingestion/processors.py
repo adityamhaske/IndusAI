@@ -3,7 +3,7 @@ import time
 import json
 import logging
 from pathlib import Path
-import google.generativeai as genai
+from google import genai
 from typing import List
 from app.core.schemas import DocumentChunk, ChunkMetadata
 from app.core.interfaces.chunker_interface import ChunkerInterface
@@ -20,7 +20,7 @@ class PDFProcessor:
             logger.error("GEMINI_API_KEY is missing")
             raise ValueError("API key is required to process PDFs")
             
-        genai.configure(api_key=self.api_key)
+        client = genai.Client(api_key=self.api_key)
         
         logger.info(f"Uploading {filename} to Gemini...")
         
@@ -31,7 +31,7 @@ class PDFProcessor:
             tmp_path = tmp.name
             
         try:
-            uploaded_file = genai.upload_file(path=tmp_path, display_name=Path(filename).name)
+            uploaded_file = client.files.upload(file=tmp_path, config={'display_name': Path(filename).name})
         finally:
             os.unlink(tmp_path)
         
@@ -44,37 +44,34 @@ class PDFProcessor:
             logger.info("Waiting for PDF to be processed by Gemini...")
             time.sleep(POLL_INTERVAL)
             elapsed += POLL_INTERVAL
-            uploaded_file = genai.get_file(uploaded_file.name)
+            uploaded_file = client.files.get(name=uploaded_file.name)
             
         if uploaded_file.state.name == "FAILED":
-            genai.delete_file(uploaded_file.name)
+            client.files.delete(name=uploaded_file.name)
             raise RuntimeError("Gemini failed to process the PDF.")
             
-        logger.info("Extracting chunks via Gemini 2.5 Flash...")
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        logger.info("Extracting chunks via Gemini...")
         prompt = (
             "Analyze this document. Extract the text and break it down into logical, coherent paragraphs or sections "
             "suitable for a vector database. Return ONLY a valid JSON array of strings, where each string represents a chunk of text. "
             "Do not include any markdown formatting or code blocks."
         )
-        response = model.generate_content([uploaded_file, prompt])
+        
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=[uploaded_file, prompt],
+            config=genai.types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
         
         try:
-            raw_text = response.text.strip()
+            raw_text = response.text or ""
+            if not raw_text.strip():
+                raise ValueError("Empty response from Gemini")
         except Exception as access_err:
-            # Fallback: collect partial text from candidates (e.g. MAX_TOKENS finish_reason=2)
-            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-                raw_text = "".join(
-                    part.text for part in response.candidates[0].content.parts
-                    if hasattr(part, 'text') and part.text
-                ).strip()
-            else:
-                finish_reason = response.candidates[0].finish_reason.name if response.candidates else "UNKNOWN"
-                raise ValueError(f"Gemini returned no text content for PDF (finish_reason: {finish_reason}). Error: {access_err}")
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[7:]
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]
+            finish_reason = getattr(response.candidates[0].finish_reason, "name", str(response.candidates[0].finish_reason)) if response.candidates else "UNKNOWN"
+            raise ValueError(f"Gemini returned no text content for PDF (finish_reason: {finish_reason}). Error: {access_err}")
             
         try:
             chunks_text = json.loads(raw_text.strip())
@@ -82,7 +79,7 @@ class PDFProcessor:
             logger.warning("Failed to decode JSON from Gemini, falling back to raw text")
             chunks_text = [raw_text.strip()]
             
-        genai.delete_file(uploaded_file.name)
+        client.files.delete(name=uploaded_file.name)
         
         chunks = []
         for text_chunk in chunks_text:
@@ -92,6 +89,20 @@ class PDFProcessor:
             chunks.extend(self.chunker.chunk_text(text_chunk.strip(), metadata))
             
         return chunks
+
+class TextProcessor:
+    def __init__(self, chunker: ChunkerInterface):
+        self.chunker = chunker
+        
+    def process(self, file_bytes: bytes, filename: str) -> List[DocumentChunk]:
+        try:
+            text = file_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            # Fallback for ISO-8859-1 or other text formats
+            text = file_bytes.decode('latin-1')
+        
+        metadata = ChunkMetadata(source_file=filename, chunk_id="")
+        return self.chunker.chunk_text(text, metadata)
 
 class L5XProcessor:
     def __init__(self, chunker: ChunkerInterface):

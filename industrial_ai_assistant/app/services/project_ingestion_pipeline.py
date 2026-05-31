@@ -51,12 +51,16 @@ class ProjectIngestionPipeline:
         svc = UserSettingsService()
         api_key = svc.get_raw_key(uid, "llm_api_key_enc") or ""
 
+        from app.ingestion.processors import PDFProcessor, L5XProcessor, ExcelProcessor, TextProcessor
+        
         chunker = SemanticChunker()
         processors = {
             "pdf": PDFProcessor(chunker=chunker, api_key=api_key),
             "l5x": L5XProcessor(chunker=chunker),
             "xlsx": ExcelProcessor(chunker=chunker),
             "xls": ExcelProcessor(chunker=chunker),
+            "txt": TextProcessor(chunker=chunker),
+            "md": TextProcessor(chunker=chunker),
         }
 
         result = IngestionResult(
@@ -86,6 +90,8 @@ class ProjectIngestionPipeline:
 
                 chunks = []
                 if ext == "pdf":
+                    chunks = processors[ext].process(file_bytes, filename)
+                elif ext in ["txt", "md"]:
                     chunks = processors[ext].process(file_bytes, filename)
                 elif ext == "l5x":
                     import tempfile
