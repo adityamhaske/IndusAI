@@ -5,8 +5,8 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.models import PayloadSchemaType
 
 def main():
-    qdrant_url = os.environ.get("QDRANT_URL", "https://ad28fdb6-2393-4637-afa2-d1c61b9338f1.us-east4-0.gcp.cloud.qdrant.io")
-    qdrant_api_key = os.environ.get("QDRANT_API_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIiwic3ViamVjdCI6ImFwaS1rZXk6MjZhMDBhZWUtYjU3My00MDc5LTlkNWItYTM4Y2I2NzA2Mzc3In0.Xrcro5ZdFrEInlZh46sl1xwY9dQsKEf_F7WGBPkc9H8")
+    qdrant_url = os.environ.get("QDRANT_URL")
+    qdrant_api_key = os.environ.get("QDRANT_API_KEY")
     
     if not qdrant_url or not qdrant_api_key:
         print("Missing QDRANT_URL or QDRANT_API_KEY")
